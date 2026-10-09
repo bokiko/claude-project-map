@@ -1,0 +1,6 @@
+runs/
+.project-map/
+__pycache__/
+*.bak
+.backups/
+.DS_Store

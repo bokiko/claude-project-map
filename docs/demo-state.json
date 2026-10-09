@@ -1,0 +1,504 @@
+{
+ "schema": "project-map-4",
+ "generation": "000007-9b1e4c20",
+ "base": "000006-2d7a8f31",
+ "generation_files": [
+  "brief.txt",
+  "index.html",
+  "invocation/invocation.json",
+  "invocation/judgement.in.json",
+  "invocation/judgement.out.json",
+  "invocation/pack.json",
+  "invocation/plan.json",
+  "invocation/snapshot.json",
+  "judgement.json",
+  "manifest.json",
+  "mobile.html",
+  "pack.json",
+  "plan.json",
+  "snapshot.json",
+  "state.json"
+ ],
+ "identity": {
+  "name": "Lanternfish",
+  "folder": "/home/demo/projects/lanternfish",
+  "branch": "main",
+  "head": "3f9c2d1",
+  "snapshot_at": "2026-10-08T09:42:10+00:00",
+  "generation": "000007-9b1e4c20"
+ },
+ "project": {
+  "name": "Lanternfish",
+  "tagline": "Self-hosted uptime monitor for small teams",
+  "goal": "Check HTTP, TCP and DNS targets from one binary, alert over email and webhooks, ship a 1.0 people can install with pip",
+  "ledger": null
+ },
+ "phases": [
+  {
+   "id": "P1",
+   "label": "Checks engine (v0.1-v0.2)",
+   "done": 4,
+   "total": 4,
+   "criteria": [
+    {
+     "id": "P1.c1",
+     "text": "HTTP, TCP and DNS checks",
+     "done": true,
+     "ref": "file:lanternfish/checks.py"
+    },
+    {
+     "id": "P1.c2",
+     "text": "Scheduler with per-target intervals",
+     "done": true,
+     "ref": "file:lanternfish/scheduler.py"
+    },
+    {
+     "id": "P1.c3",
+     "text": "YAML target config",
+     "done": true,
+     "ref": "commit:a41c0de"
+    },
+    {
+     "id": "P1.c4",
+     "text": "v0.2.0 tagged",
+     "done": true,
+     "ref": "commit:b7e5512"
+    }
+   ],
+   "state": "done"
+  },
+  {
+   "id": "P2",
+   "label": "Alert channels (v0.3)",
+   "done": 2,
+   "total": 3,
+   "criteria": [
+    {
+     "id": "P2.c1",
+     "text": "Email alerts over SMTP",
+     "done": true,
+     "ref": "file:lanternfish/alerts.py"
+    },
+    {
+     "id": "P2.c2",
+     "text": "Webhook alerts with signed payloads",
+     "done": true,
+     "ref": "commit:c92d3f0"
+    },
+    {
+     "id": "P2.c3",
+     "text": "Webhook retries with backoff",
+     "done": false,
+     "ref": null
+    }
+   ],
+   "state": "open",
+   "blocking": true
+  },
+  {
+   "id": "P3",
+   "label": "Web dashboard (v0.4)",
+   "done": 3,
+   "total": 3,
+   "criteria": [
+    {
+     "id": "P3.c1",
+     "text": "Status page with 90-day history",
+     "done": true,
+     "ref": "file:lanternfish/web/status.py"
+    },
+    {
+     "id": "P3.c2",
+     "text": "Incident timeline view",
+     "done": true,
+     "ref": "commit:d03a9b1"
+    },
+    {
+     "id": "P3.c3",
+     "text": "Dashboard tests",
+     "done": true,
+     "ref": "file:tests/test_web.py"
+    }
+   ],
+   "state": "done"
+  },
+  {
+   "id": "P4",
+   "label": "Release hygiene (v1.0)",
+   "done": 3,
+   "total": 4,
+   "criteria": [
+    {
+     "id": "P4.c1",
+     "text": "CI matrix on Python 3.9-3.13",
+     "done": true,
+     "ref": "file:lanternfish/ci.py"
+    },
+    {
+     "id": "P4.c2",
+     "text": "Lint clean across modules",
+     "done": true,
+     "ref": "commit:e5f60a7"
+    },
+    {
+     "id": "P4.c3",
+     "text": "CHANGELOG has a 1.0.0 entry",
+     "done": true,
+     "ref": "commit:3f9c2d1"
+    },
+    {
+     "id": "P4.c4",
+     "text": "Package published to PyPI",
+     "done": false,
+     "ref": null
+    }
+   ],
+   "state": "current"
+  }
+ ],
+ "headline": {
+  "text": "1.0.0 changelog is in; the only open item is publishing to PyPI (D-001), which waits on the owner.",
+  "tone": "watch",
+  "note": "Unfinished earlier phase: Alert channels (v0.3)"
+ },
+ "focus": {
+  "phase": "P4",
+  "label": "Release hygiene (v1.0)",
+  "done": 3,
+  "total": 4,
+  "next_step": {
+   "title": "Answer D-001: publish 1.0.0 to PyPI or not",
+   "why": "Publishing to a public registry is a hard-rule action and only the owner can approve it. The changelog is no longer a blocker.",
+   "actor": "owner",
+   "unblocks": [
+    "pypi"
+   ]
+  }
+ },
+ "decisions": [
+  {
+   "recommended": "A",
+   "hard_rule": "publishing to a public registry (push)",
+   "deadline": null,
+   "ready": true,
+   "id": "D-001",
+   "q": "Publish lanternfish 1.0.0 to PyPI?",
+   "options": [
+    {
+     "id": "A",
+     "label": "Publish 1.0.0 to PyPI"
+    },
+    {
+     "id": "B",
+     "label": "Keep unpublished; README says install from GitHub"
+    }
+   ],
+   "default": "hold",
+   "status": "open",
+   "raised_at": "2026-10-08T09:30:02+00:00"
+  }
+ ],
+ "parts": [
+  {
+   "id": "checks",
+   "label": "Checks engine",
+   "status": "done",
+   "line": "HTTP, TCP and DNS probes with timeouts",
+   "ref": "file:lanternfish/checks.py"
+  },
+  {
+   "id": "scheduler",
+   "label": "Scheduler",
+   "status": "done",
+   "line": "One loop, per-target intervals, jitter",
+   "ref": "file:lanternfish/scheduler.py"
+  },
+  {
+   "id": "email",
+   "label": "Email alerts",
+   "status": "done",
+   "line": "SMTP with TLS, one mail per incident",
+   "ref": "file:lanternfish/alerts.py"
+  },
+  {
+   "id": "webhook",
+   "label": "Webhook alerts",
+   "status": "in_progress",
+   "line": "Signed payloads ship; retries with backoff are missing",
+   "ref": "commit:c92d3f0"
+  },
+  {
+   "id": "dashboard",
+   "label": "Web dashboard",
+   "status": "done",
+   "line": "Status page and incident timeline",
+   "ref": "file:lanternfish/web/status.py"
+  },
+  {
+   "id": "release",
+   "label": "Release notes",
+   "status": "done",
+   "line": "CHANGELOG now has the 1.0.0 entry",
+   "ref": "commit:3f9c2d1"
+  },
+  {
+   "id": "pypi",
+   "label": "PyPI distribution",
+   "status": "in_progress",
+   "line": "Not published; waits on D-001. README says pip install lanternfish",
+   "ref": "commit:7a2b6c4"
+  }
+ ],
+ "changes": [
+  {
+   "id": "headline",
+   "label": "Headline",
+   "text": "changed",
+   "to": null,
+   "at": "2026-10-08T09:42:10+00:00"
+  },
+  {
+   "id": "release",
+   "label": "Release notes",
+   "text": "status: in_progress → done",
+   "to": "done",
+   "at": "2026-10-08T09:42:10+00:00"
+  },
+  {
+   "id": "pypi",
+   "label": "PyPI distribution",
+   "text": "status: stuck → in_progress",
+   "to": "in_progress",
+   "at": "2026-10-08T09:42:10+00:00"
+  }
+ ],
+ "risks": [],
+ "loops": [],
+ "eta": null,
+ "next_step": {
+  "title": "Answer D-001: publish 1.0.0 to PyPI or not",
+  "why": "Publishing to a public registry is a hard-rule action and only the owner can approve it. The changelog is no longer a blocker.",
+  "actor": "owner",
+  "unblocks": [
+   "pypi"
+  ]
+ },
+ "history": [
+  {
+   "run": 1,
+   "at": "2026-10-08T09:30:02+00:00",
+   "generation": "000001-4c0a9e17",
+   "counts": {
+    "done": 4,
+    "in_progress": 2,
+    "stuck": 1,
+    "unknown": 0
+   },
+   "phase": {
+    "current": "P4",
+    "done": 2,
+    "total": 4
+   },
+   "changed": [],
+   "decisions_opened": [
+    "D-001"
+   ],
+   "decisions_closed": [],
+   "usage": {
+    "claude": 61000,
+    "codex": 0,
+    "all": 61000
+   }
+  },
+  {
+   "run": 2,
+   "at": "2026-10-08T09:42:10+00:00",
+   "generation": "000007-9b1e4c20",
+   "counts": {
+    "done": 5,
+    "in_progress": 2,
+    "stuck": 0,
+    "unknown": 0
+   },
+   "phase": {
+    "current": "P4",
+    "done": 3,
+    "total": 4
+   },
+   "changed": [
+    {
+     "id": "headline",
+     "label": "Headline",
+     "text": "changed"
+    },
+    {
+     "id": "release",
+     "label": "Release notes",
+     "text": "status: in_progress → done"
+    },
+    {
+     "id": "pypi",
+     "label": "PyPI distribution",
+     "text": "status: stuck → in_progress"
+    }
+   ],
+   "decisions_opened": [],
+   "decisions_closed": [],
+   "usage": {
+    "claude": 84000,
+    "codex": 0,
+    "all": 84000
+   }
+  }
+ ],
+ "usage": {
+  "at": "2026-10-08T09:42:10+00:00",
+  "approximate": false,
+  "sources": {
+   "claude": "ok",
+   "codex": "ok"
+  },
+  "totals": {
+   "claude": 84000,
+   "codex": 0,
+   "all": 84000,
+   "jobs": 3
+  },
+  "by_model": [
+   {
+    "model": "claude-sonnet-5-5",
+    "group": "claude",
+    "family": "sonnet",
+    "total": 58000,
+    "jobs": 2
+   },
+   {
+    "model": "claude-opus-5-5",
+    "group": "claude",
+    "family": "opus",
+    "total": 26000,
+    "jobs": 1
+   }
+  ],
+  "jobs": [
+   {
+    "label": "Update project map",
+    "model": "claude-sonnet-5-5",
+    "source": "claude",
+    "in": 12,
+    "out": 3100,
+    "cache": 24800,
+    "at": "2026-10-08"
+   },
+   {
+    "label": "Update project map",
+    "model": "claude-sonnet-5-5",
+    "source": "claude",
+    "in": 9,
+    "out": 2400,
+    "cache": 27700,
+    "at": "2026-10-08"
+   },
+   {
+    "label": "First map",
+    "model": "claude-opus-5-5",
+    "source": "claude",
+    "in": 15,
+    "out": 5200,
+    "cache": 20800,
+    "at": "2026-10-08"
+   }
+  ],
+  "jobs_omitted": 0
+ },
+ "stale": null,
+ "coverage": {
+  "coverage": "complete",
+  "covered": 7,
+  "total": 7
+ },
+ "template_hash": "0a1b2c3d4e5f",
+ "embed_hash": "5f4e3d2c1b0a",
+ "judged_at": "2026-10-08T09:42:10+00:00",
+ "judged_key": {
+  "heads": {
+   ".": "3f9c2d1a77e4"
+  },
+  "branches": {
+   ".": "main"
+  },
+  "status_hash": "1d2c3b4a5f60",
+  "watch_hashes": {
+   "README.md": "a1b2c3d4e5f6",
+   "CHANGELOG.md": "b2c3d4e5f6a1",
+   "pyproject.toml": "c3d4e5f6a1b2",
+   "lanternfish/checks.py": "d4e5f6a1b2c3",
+   "lanternfish/alerts.py": "e5f6a1b2c3d4"
+  },
+  "ledger_hash": null,
+  "answers_count": 0,
+  "expired_ids": [],
+  "schema": "project-map-4"
+ },
+ "answers": {
+  "total": 0,
+  "applied": 0,
+  "applied_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "bad": []
+ },
+ "watch": [
+  "README.md",
+  "CHANGELOG.md",
+  "pyproject.toml",
+  "lanternfish/checks.py",
+  "lanternfish/alerts.py"
+ ],
+ "watch_dropped": [],
+ "repos": [
+  {
+   "path": ".",
+   "vcs": "git",
+   "branch": "main",
+   "head": "3f9c2d1a77e4",
+   "head_at": "2026-10-08T09:41:55+00:00"
+  }
+ ],
+ "commits": {
+  "count": 2,
+  "listed": 2,
+  "flagged": 1,
+  "days": [
+   {
+    "day": "2026-10-08",
+    "n": 2,
+    "items": [
+     {
+      "r": ".",
+      "h": "3f9c2d1",
+      "s": "changelog: 1.0.0 entry",
+      "f": "watch"
+     },
+     {
+      "r": ".",
+      "h": "7a2b6c4",
+      "s": "docs: install from PyPI"
+     }
+    ]
+   }
+  ]
+ },
+ "status": {
+  "dirty": 0,
+  "hash": "1d2c3b4a5f60"
+ },
+ "ledger": null,
+ "run": {
+  "n": 2,
+  "type": "UPDATE",
+  "model": "sonnet",
+  "at": "2026-10-08T09:42:10+00:00"
+ },
+ "template_feedback": [],
+ "kept": [],
+ "retired_ids": []
+}

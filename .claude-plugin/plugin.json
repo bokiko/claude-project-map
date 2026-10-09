@@ -1,0 +1,18 @@
+{
+  "name": "project-map",
+  "version": "3.2.2",
+  "description": "One-page HTML project map for any project under a supported root: where the project is, what is stuck, what needs your decision. Cheap when nothing changed.",
+  "author": {
+    "name": "bokiko"
+  },
+  "homepage": "https://github.com/bokiko/claude-project-map",
+  "repository": "https://github.com/bokiko/claude-project-map",
+  "license": "MIT",
+  "keywords": [
+    "project-map",
+    "status",
+    "planning",
+    "dashboard",
+    "subagent"
+  ]
+}

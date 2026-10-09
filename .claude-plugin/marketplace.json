@@ -1,0 +1,13 @@
+{
+  "name": "bokiko-tools",
+  "description": "Claude Code plugins by bokiko",
+  "owner": { "name": "bokiko" },
+  "plugins": [
+    {
+      "name": "project-map",
+      "source": "./",
+      "description": "One-page HTML project map for any project under a supported root: progress, stuck parts, open decisions. Cheap when nothing changed.",
+      "category": "productivity"
+    }
+  ]
+}

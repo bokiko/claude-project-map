@@ -4,6 +4,7 @@
 Used by project-map-facts.py and project-map-embed.py (mechanical mode). Read-only apart from the in-memory
 watch cache the caller persists. Every git call goes through pm_git.
 """
+import copy
 import glob
 import hashlib
 import os
@@ -15,13 +16,14 @@ import time
 
 import pm_common as C
 import pm_git as G
+import pm_validate as VAL
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAIL_RE = re.compile(r"fail|revert|broken|rollback", re.I)
 LEDGER_KEYS = (("goal", r"goal"), ("now", r"now"), ("next", r"next"), ("blockers", r"blockers?"))
 SKIP_DIRS = {".git", ".project-map", "node_modules", "__pycache__", ".venv"}
 DEFAULT_WATCH = ("README*", "PLAN*", "ROADMAP*", "TODO*", "CHANGELOG*", "docs", "thoughts/ledgers")
-GIT_KEYS = ("heads", "branches", "status_hash")
+GIT_KEYS = ("heads", "branches", "status_hash", "release")
 MAX_COMMITS = 40
 PACK_MAX = 8192
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -29,6 +31,10 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 class GitCollectError(Exception):
     """A git command failed to run: the verdict is ERROR, never NO_CHANGE."""
+
+
+class AnswersUnreadable(Exception):
+    pass
 
 
 class AnswersRewritten(Exception):
@@ -111,6 +117,337 @@ def log_records(repo, n, paths=(), timeout=20.0):
     return recs
 
 
+# ---------------------------------------------------------------- release facts (3.3.0)
+# Local evidence only: tags that point at the pinned HEAD, and the branch's configured upstream as the local
+# tracking ref records it. No fetch, no ls-remote, no network: a "ref" here can be stale, so every sentence built
+# from these facts says "local tracking state" and never claims a release or a push.
+SYNC_STATES = ("aligned", "ahead", "behind", "diverged", "no_upstream", "missing_upstream", "detached", "unborn", "unknown")
+MAX_TAG_ROWS = 20000   # streamed and hashed, never held; past this the tag set is reported as partial coverage
+HEAD_TAGS_SHOWN = 20
+NAME_MAX = 120
+
+
+def _max_tag_rows():
+    try:
+        return max(1, int(os.environ.get("PM_MAX_TAG_ROWS", "") or MAX_TAG_ROWS))   # test hook
+    except ValueError:
+        return MAX_TAG_ROWS
+
+
+def _tag_row(ln):
+    """One for-each-ref row (fixed %00 format) -> {name, kind, oid, commit} or None; kind lightweight | annotated | noncommit."""
+    f = ln.split("\0")
+    if len(f) != 5 or not f[0].startswith("refs/tags/") or len(f[0]) == 10:
+        return None
+    otype, oid, ptype, poid = f[1:]
+    if otype == "commit" and HEX40.match(oid):
+        kind, commit = "lightweight", oid
+    elif otype == "tag" and ptype == "commit" and HEX40.match(poid):
+        kind, commit = "annotated", poid
+    else:   # tree/blob targets, or a tag of a tag: kept as a marker, never called a commit
+        kind, commit = "noncommit", None
+    return {"name": f[0][10:], "kind": kind, "oid": oid if HEX40.match(oid) else None, "commit": commit}
+
+
+def _tag_rows(out, limit=5):
+    rows = []
+    for ln in out.split("\n")[:limit]:
+        r = _tag_row(ln)
+        if r:
+            rows.append(r)
+    return rows
+
+
+def _up_name(ref, kind):
+    if not ref:
+        return ""
+    if kind == "local":
+        return "local " + (ref[11:] if ref.startswith("refs/heads/") else ref)
+    return ref[13:] if ref.startswith("refs/remotes/") else ref
+
+
+def release_line(rel):
+    """The one script-owned sentence about tags and branch sync (<= 200 bytes). Never says released or pushed."""
+    if not isinstance(rel, dict):
+        return ""
+    sy = rel.get("sync") or {}
+    st, up = sy.get("state"), C.trim(_up_name(sy.get("upstream_ref"), sy.get("upstream_kind")), 50)
+    parts = []
+    if rel.get("head_tags") is None:
+        parts.append("tags unknown")   # exhausted re-reads: tag coverage was not verified, so no absence is claimed
+    elif rel.get("head_oid"):
+        names = [C.trim(t["name"], 40) for t in rel.get("head_tags") or []]
+        total = rel.get("head_tags_total", len(names))
+        if total:
+            more = " +%d" % (total - 3) if total > 3 else ""
+            parts.append("tagged %s%s at HEAD%s" % (", ".join(names[:3]), more, " (tag list incomplete)" if rel.get("head_tags_partial") else ""))
+        elif rel.get("head_tags_partial"):
+            parts.append("tag list incomplete")
+        else:
+            parts.append("no tag at HEAD")
+    n_a, n_b = sy.get("ahead"), sy.get("behind")
+    if st == "aligned":
+        parts.append("in sync with %s (local tracking state)" % up)
+    elif st == "ahead":
+        parts.append("%d commit%s ahead of %s" % (n_a, "" if n_a == 1 else "s", up))
+    elif st == "behind":
+        parts.append("%d commit%s behind %s" % (n_b, "" if n_b == 1 else "s", up))
+    elif st == "diverged":
+        parts.append("diverged from %s (%d ahead, %d behind)" % (up, n_a, n_b))
+    elif st == "no_upstream":
+        parts.append("no upstream")
+    elif st == "missing_upstream":
+        parts.append("upstream %s missing locally" % up)
+    elif st == "detached":
+        parts.append("detached HEAD")
+    elif st == "unborn":
+        parts.append("no commits yet")
+    else:
+        parts.append("sync unknown")
+    if rel.get("shallow"):
+        parts.append("shallow clone")
+    line = " · ".join(parts)
+    if rel.get("shared"):
+        line = "shared repo: " + line
+    return C.trim(line, 200)
+
+
+def release_key(rel, tags):
+    """Change-key entry: head-tag identity digest (over the COMPLETE set) + upstream ref + sync state + ahead count. Not
+    the behind count, not recent_tags, no timestamps. In a shared (sub-folder) repository only 'ahead > 0' counts, so a
+    colleague's unrelated commit does not re-judge every package. tags = {"hash", "n", "partial"}; a partial tag set
+    carries partial True: compare_keys compares it like any other field (a change is a move) and reports it as incomplete coverage."""
+    sy = rel["sync"]
+    ahead = sy.get("ahead")
+    if rel.get("shared") and ahead is not None:
+        ahead = 1 if ahead > 0 else 0
+    key = {"tags": tags["hash"], "n": tags["n"], "upstream": C.ref_ident(sy["upstream_ref"]) if sy.get("upstream_ref") else None,
+           "state": sy.get("state"), "ahead": ahead}
+    if tags.get("partial"):
+        key["partial"] = True
+    return key
+
+
+def collect_release(repo, git_timeout=20.0, shared=False):
+    """Tags at the pinned HEAD, five recent tags (display only) and branch sync, from local refs only.
+    -> release dict, or None when the object format is unsupported (not 40-hex). Failures of the tag listing raise
+    GitCollectError; failures on the upstream side give sync.state 'unknown' with null counts (never an invented 0).
+    Reads several refs, so HEAD, the symbolic branch and the literal upstream ref are pinned first and re-read last; a
+    move in between retries, then reports unknown. Every name that reaches the result is in display-safe form; the
+    raw identities only feed the key (hashed) and the git calls."""
+    def g(sub, *args):
+        try:
+            return grun(repo, sub, *args, timeout=git_timeout)
+        except G.GitArgError as ex:
+            raise GitCollectError("git argument rejected: %s" % ex)
+        except BudgetOut:
+            raise
+        except Exception as ex:   # noqa: BLE001
+            raise GitCollectError("git %s failed: %s" % (sub, type(ex).__name__))
+
+    def ref_state(ref):
+        """Existence and type of ONE literal ref -> 'absent' | 'commit' | 'other' | 'broken' | 'error'. Only a successful
+        query with no row documents absence. 'broken' = the query itself failed the way git fails on a ref to a missing
+        object (rc 1/128): a stable condition, kept apart from 'absent' and from a timeout. 'error' = timeout or any other
+        failure: unverified, it never equals an earlier answer."""
+        rc, out = g("for-each-ref", G.REF_TYPE_FMT, ref)
+        if rc in (1, 128):
+            return "broken"
+        if rc != 0:
+            return "error"
+        rows = [ln.split("\0") for ln in out.split("\n") if ln]
+        rows = [r for r in rows if r and r[0] == ref]   # the pattern also matches refs below it
+        if not rows:
+            return "absent"
+        if len(rows) == 1 and len(rows[0]) == 3 and rows[0][1] == "commit" and HEX40.match(rows[0][2]):
+            return "commit"
+        return "other"
+
+    def up_meta(branch_ref):
+        rc6, out6 = g("for-each-ref", G.UP_FMT, branch_ref)
+        f = out6.rstrip("\n").split("\0")
+        if rc6 != 0 or len(f) != 4 or f[0] != branch_ref:
+            return None
+        return f[1], f[2]   # literal upstream ref ("" = none), remote name
+
+    def one_pass():
+        rel = {"shared": bool(shared), "head_oid": None, "head_tags": [], "head_tags_total": 0, "recent_tags": [],
+               "sync": {"branch_ref": None, "upstream_ref": None, "upstream_kind": None, "state": "unknown",
+                        "ahead": None, "behind": None}, "shallow": None}
+        sy = rel["sync"]
+        pin = {"oid": None, "branch": None, "up": None, "uoid": None, "hs": None, "us": None}
+        tags = {"h": hashlib.sha256(), "n": 0, "partial": False}
+        rc, out = g("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+        oid = out.strip()
+        if rc == 0 and not HEX40.match(oid):
+            return None, None, None   # SHA-256 or an unexpected form: unsupported, reported as no release facts
+        if rc not in (0, 1, 128):
+            raise GitCollectError("git rev-parse failed (rc %d)" % rc)
+        if rc == 0:
+            rel["head_oid"] = pin["oid"] = oid
+        rc2, out2 = g("symbolic-ref", "--quiet", "HEAD")
+        if rc2 == 0 and out2.strip():
+            pin["branch"] = out2.strip()
+        elif rc2 != 1:
+            raise GitCollectError("git symbolic-ref failed (rc %d)" % rc2)
+        rc3, out3 = g("rev-parse", "--is-shallow-repository")
+        if rc3 == 0 and out3.strip() in ("true", "false"):
+            rel["shallow"] = out3.strip() == "true"
+        if oid and rc == 0:
+            shown = []
+
+            def on_row(ln):
+                t = _tag_row(ln)
+                if not t or t["kind"] == "noncommit" or t["commit"] != oid:
+                    return
+                tags["h"].update(("%s\0%s\0%s\n" % (t["name"], t["oid"] or "", t["commit"] or "")).encode("utf-8", "replace"))
+                tags["n"] += 1
+                if len(shown) < HEAD_TAGS_SHOWN:
+                    shown.append(t)
+            t_s = step(git_timeout)
+            try:
+                rc4, trunc = G.stream_lines(repo, "for-each-ref", "--sort=refname", G.TAG_FMT, "--points-at=" + oid, "refs/tags",
+                                            timeout=t_s, max_rows=_max_tag_rows(), on_row=on_row)
+            except G.GitArgError as ex:
+                raise GitCollectError("git argument rejected: %s" % ex)
+            if rc4 == 124 and left() < 0.05:
+                raise BudgetOut("budget")
+            if rc4 != 0:
+                raise GitCollectError("git for-each-ref failed (rc %d)" % rc4)
+            tags["partial"] = bool(trunc)
+            rel["head_tags_total"] = tags["n"]
+            if trunc:
+                rel["head_tags_partial"] = True   # more tags than were read: the count is a lower bound
+            rel["head_tags"] = [{"name": C.display_safe(t["name"], NAME_MAX), "kind": t["kind"], "tid": C.tag_tid(t["name"])} for t in shown]
+        rc5, out5 = g("for-each-ref", "--sort=refname", "--sort=-creatordate", "--count=5", G.TAG_FMT, "refs/tags")
+        if rc5 != 0:
+            raise GitCollectError("git for-each-ref failed (rc %d)" % rc5)
+        rel["recent_tags"] = [{"name": C.display_safe(t["name"], NAME_MAX), "kind": t["kind"],
+                               "at": t["commit"][:7] if t["commit"] else None} for t in _tag_rows(out5)]
+        # ---- sync (raw refs live in pin; sy gets display forms at the end)
+        raw_up = None
+        if rc != 0:   # no commit at HEAD: an attached branch whose ref genuinely does not exist is unborn, anything else unknown
+            sy["state"] = "unknown"
+            if pin["branch"] and G.branch_ref_ok(pin["branch"]):
+                pin["hs"] = ref_state(pin["branch"])   # absent / commit / other / broken / error, pinned like any other identity
+                if pin["hs"] == "absent":
+                    sy["state"] = "unborn"
+        elif pin["branch"] is None:
+            sy["state"] = "detached"
+        elif not G.branch_ref_ok(pin["branch"]):
+            sy["state"] = "unknown"
+        else:
+            meta = up_meta(pin["branch"])
+            if meta is None:
+                sy["state"] = "unknown"
+            elif not meta[0]:
+                sy["state"] = "no_upstream"
+            elif not G.upstream_ref_ok(meta[0]):
+                sy["state"] = "unknown"
+            else:
+                raw_up = pin["up"] = meta[0]
+                sy["upstream_kind"] = "local" if meta[1] == "." else "remote"
+                rc7, out7 = g("rev-parse", "--verify", "--end-of-options", raw_up + "^{commit}")
+                uo = out7.strip()
+                if rc7 == 0 and HEX40.match(uo):
+                    pin["uoid"], pin["us"] = uo, "ok"
+                    rc8, out8 = g("rev-list", "--left-right", "--count", "%s...%s" % (oid, uo))
+                    m = re.fullmatch(r"([0-9]+)\s+([0-9]+)\s*", out8) if rc8 == 0 else None
+                    if not m:
+                        sy["state"] = "unknown"
+                    else:
+                        a, b = int(m.group(1)), int(m.group(2))
+                        sy.update(ahead=a, behind=b, state="aligned" if not a and not b else "ahead" if not b
+                                  else "behind" if not a else "diverged")
+                elif rc7 in (1, 128):   # not a commit: absent, or present but malformed? ask a narrow existence/type query
+                    st = pin["us"] = ref_state(raw_up)
+                    sy["state"] = "missing_upstream" if st == "absent" else "unknown"
+                else:
+                    pin["us"] = "bad" if rc7 == 0 else "err"   # "err" never equals a final answer (pin_now reports None for it)
+                    sy["state"] = "unknown"
+        sy["branch_ref"] = C.display_safe(pin["branch"]) if pin["branch"] else None
+        sy["upstream_ref"] = C.display_safe(raw_up) if raw_up else None
+        return rel, tags, (pin, raw_up)
+
+    UNREAD = object()
+    final = {"oid": UNREAD}   # the HEAD oid the last pin_now read (None = verified unborn/unresolvable), UNREAD = the read failed
+
+    def pin_now():
+        """The identities one_pass pinned, read again: HEAD oid, symbolic branch, literal upstream ref and its oid.
+        -> the pin dict, or None when ANY of the reads did not succeed (timeout, error, malformed answer). Absence is
+        only what a successful query documents (HEAD unborn: branch ref genuinely absent; detached symbolic-ref rc 1; no
+        upstream configured; upstream ref genuinely absent): a failed query is never folded into those, so it can never
+        match an earlier pin. rc 1/128 of rev-parse is not that evidence: it goes through the same exact existence/type
+        query (ref_state) as the first pass, and absent / commit / other / broken stay distinct in the pin."""
+        final["oid"] = UNREAD
+        rc, out = g("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+        if rc == 0:
+            cur = {"oid": out.strip(), "branch": None, "up": None, "uoid": None, "hs": None, "us": None}
+            final["oid"] = cur["oid"]
+        elif rc in (1, 128):
+            cur = {"oid": None, "branch": None, "up": None, "uoid": None, "hs": None, "us": None}
+            final["oid"] = None
+        else:
+            return None
+        rc2, out2 = g("symbolic-ref", "--quiet", "HEAD")
+        if rc2 == 0 and out2.strip():
+            cur["branch"] = out2.strip()
+        elif rc2 != 1:
+            return None
+        if not cur["oid"] and cur["branch"] and G.branch_ref_ok(cur["branch"]):
+            cur["hs"] = ref_state(cur["branch"])
+            if cur["hs"] == "error":
+                return None
+        if cur["oid"] and cur["branch"] and G.branch_ref_ok(cur["branch"]):   # one_pass reads the upstream only for a born HEAD
+            meta = up_meta(cur["branch"])
+            if meta is None:
+                return None
+            if meta[0] and G.upstream_ref_ok(meta[0]):
+                cur["up"] = meta[0]
+                rc3, out3 = g("rev-parse", "--verify", "--end-of-options", meta[0] + "^{commit}")
+                if rc3 == 0:
+                    if HEX40.match(out3.strip()):
+                        cur["uoid"], cur["us"] = out3.strip(), "ok"
+                    else:
+                        cur["us"] = "bad"   # malformed: one_pass reports unknown for it too
+                elif rc3 in (1, 128):
+                    cur["us"] = ref_state(meta[0])
+                    if cur["us"] == "error":
+                        return None
+                else:
+                    return None
+        return cur
+
+    rel, tags, pr = one_pass()
+    for attempt in range(3):
+        if rel is None:
+            return None
+        now_pin = pin_now()   # None = a read failed: unverified, treated like a move (re-read, then unknown)
+        if now_pin is not None and now_pin == pr[0]:
+            break
+        if attempt == 2:   # still moving after two re-reads: say so instead of publishing a mixed picture
+            rel["sync"].update(state="unknown", ahead=None, behind=None, branch_ref=None, upstream_ref=None, upstream_kind=None)
+            if not (pr[0]["oid"] and final["oid"] == pr[0]["oid"]):
+                # The tag set was read for a HEAD that was not verified to be the same at the end (moved, unresolvable or
+                # unread): tag coverage is UNKNOWN, never "no tag at HEAD". A set read for a HEAD oid that is verified
+                # unchanged (only the branch or its upstream kept moving) stays: that fact was checked independently.
+                rel["head_oid"], rel["head_tags"], rel["head_tags_total"] = None, None, None
+                rel.pop("head_tags_partial", None)
+                tags = None
+            pr = (pr[0], None)
+            rel["inconsistent"] = True
+            break
+        rel, tags, pr = one_pass()   # something moved while the refs were read: read again
+    rel["key"] = release_key(rel, {"hash": tags["h"].hexdigest()[:12], "n": tags["n"], "partial": tags["partial"]}
+                             if tags else {"hash": "unknown", "n": None, "partial": False})
+    if rel.get("inconsistent"):
+        rel["key"]["unverified"] = True   # script-owned uncertainty: stable while the world stays the same, never a bare "current"
+    if pr[1] and not rel.get("inconsistent"):   # key identity of the raw upstream ref (hashed when it is not display-safe)
+        rel["key"]["upstream"] = C.ref_ident(pr[1])
+    rel["line"] = release_line(rel)
+    return rel
+
+
 # ---------------------------------------------------------------- state shape
 def _is_str(x):
     return isinstance(x, str)
@@ -126,6 +463,8 @@ def state_problem(S):
             ("focus", dict), ("decisions", list), ("parts", list), ("changes", list), ("risks", list), ("history", list),
             ("coverage", dict), ("template_hash", str), ("embed_hash", str), ("judged_key", dict), ("answers", dict),
             ("retired_ids", list), ("watch", list), ("repos", list))
+    if "retired_decisions" in S and not isinstance(S["retired_decisions"], str):
+        return "key retired_decisions is not str"
     for k, t in need:
         if not isinstance(S.get(k), t):
             return "key %s is not %s" % (k, t.__name__)
@@ -381,7 +720,7 @@ def _plain(repo, info):
     return info, 0, sig[0], [], []
 
 
-def collect_repo(root, rp, prev_head, watch_rel, git_timeout):
+def collect_repo(root, rp, prev_head, watch_rel, git_timeout, rel_cache=None):
     """-> (info, count, status signature, dirty paths relative to ROOT, listed commits)."""
     repo = root if rp == "." else os.path.join(root, rp)
     info = {"path": rp, "vcs": "none", "head": None, "branch": None, "head_at": None, "rewritten": False, "commits": 0}
@@ -414,10 +753,16 @@ def collect_repo(root, rp, prev_head, watch_rel, git_timeout):
         _, br = gcall(repo, "rev-parse", "--abbrev-ref", "HEAD", timeout=git_timeout)
     else:
         _, br = gcall(repo, "branch", "--show-current", timeout=git_timeout)
-    info.update(vcs="git", head=head[:12] if head else None, branch=br.strip() or None,
+    info.update(vcs="git", head=head[:12] if head else None, branch=C.ref_ident(br.strip()) if br.strip() else None,
                 head_at=C.iso(_dt().fromtimestamp(recs0[0][1]).astimezone()) if recs0 else None)
     if sub:
         info["toplevel"], info["scope"] = topr, rel
+    # release facts are per Git toplevel, collected once: a package in a monorepo shows the SHARED repository's state
+    rkey = (topr, sub)
+    cache = rel_cache if rel_cache is not None else {}
+    if rkey not in cache:
+        cache[rkey] = collect_release(repo, git_timeout, shared=sub)
+    info["release"] = copy.deepcopy(cache[rkey])
     _, st_out = gcall(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all", timeout=git_timeout)
     raw_paths, _dirty = _parse_status(st_out)
     paths = []
@@ -545,14 +890,27 @@ def parse_ledger(root, name):
 
 
 # ---------------------------------------------------------------- answers / decisions
-def read_answers(pm):
-    """-> list of (physical line no, raw bytes without line terminator) for non-blank lines."""
+def read_answers_ex(pm):
+    """-> (lines, tail). lines: (physical line no, raw bytes without line terminator) for the non-blank, COMPLETE
+    (newline-terminated) lines of answers.jsonl. tail: True when the file ends in non-blank bytes without a newline. An
+    unterminated tail is a record the owner's editor or script is still appending: it is not a line yet, so it is neither
+    applied, counted, hashed nor reported as bad, and the next run sees it as an ordinary append once its newline arrives.
+    A missing file is empty; any other read failure raises AnswersUnreadable (an unreadable file is never mistaken for an
+    empty one)."""
     try:
         with open(os.path.join(pm, "answers.jsonl"), "rb") as fh:
             data = fh.read()
-    except OSError:
-        return []
-    return [(no, ln.rstrip(b"\r")) for no, ln in enumerate(data.split(b"\n"), 1) if ln.strip()]
+    except FileNotFoundError:
+        return [], False
+    except OSError as ex:
+        raise AnswersUnreadable("answers.jsonl cannot be read (%s)" % (ex.strerror or type(ex).__name__))
+    parts = data.split(b"\n")
+    return [(no, ln.rstrip(b"\r")) for no, ln in enumerate(parts[:-1], 1) if ln.strip()], bool(parts[-1].strip())
+
+
+def read_answers(pm):
+    """The complete lines of answers.jsonl (see read_answers_ex)."""
+    return read_answers_ex(pm)[0]
 
 
 def prefix_hash(lines, n):
@@ -588,9 +946,9 @@ def parse_pending(lines):
     return pending, bad
 
 
-def lifecycle(prev_decs, pending, t):
-    """Apply answers and expiries to a copy of the previous OPEN/OVERDUE decisions (closed ones are dropped here)."""
-    by_id = {d["id"]: dict(d) for d in prev_decs if d.get("status") in ("open", "overdue")}
+def apply_answers(by_id, pending):
+    """Apply owner answers (in file order, the last one per decision wins) to by_id's open/overdue decisions in place.
+    -> list of bad {line, why}."""
     bad, applied = [], {}
     for a in pending:
         d = by_id.get(a["id"])
@@ -604,6 +962,13 @@ def lifecycle(prev_decs, pending, t):
     for i, ls in applied.items():
         if len(ls) > 1:
             bad.append({"line": ls[0], "why": "%s answered %d times, last kept" % (i, len(ls))})
+    return bad
+
+
+def lifecycle(prev_decs, pending, t):
+    """Apply answers and expiries to a copy of the previous OPEN/OVERDUE decisions (closed ones are dropped here)."""
+    by_id = {d["id"]: dict(d) for d in prev_decs if d.get("status") in ("open", "overdue")}
+    bad = apply_answers(by_id, pending)
     for d in by_id.values():
         if d["status"] in ("open", "overdue"):
             dl = C.parse_iso(d.get("deadline"))
@@ -617,16 +982,92 @@ def lifecycle(prev_decs, pending, t):
     return list(by_id.values()), bad
 
 
+def late_answers(pm, snap, ids, image=None):
+    """Owner answers appended to answers.jsonl AFTER the snapshot was staged, when a judgement is about to close decisions
+    `ids` by events (INTERFACES 12.5). None when no valid new answer targets one of them: the new lines then stay pending
+    exactly as before (the key's answers_count marks the map for a re-judgement). Otherwise every line appended since is
+    applied in file order to the staged open decisions (the applied count is a prefix, so a later answer cannot be applied
+    alone) and the owner's answer wins: -> {decisions, answers, won}, the staged view with those decisions answered and
+    answers.applied advanced past the new lines. Raises AnswersRewritten when the staged prefix no longer matches.
+    `image`: the complete lines of ONE read of answers.jsonl (read_answers_ex(pm)[0]) when the caller also needs the
+    unterminated-tail flag of that same read; the file is then not read again, so the tail flag and the late answers
+    describe the same bytes (Codex OV330-R4-1)."""
+    lines = read_answers(pm) if image is None else image   # complete lines only; raises AnswersUnreadable when unreadable
+    a = snap["answers"]
+    # the staged prefix is verified whatever was appended: a shortened file (fewer lines) or a rewritten one with the same
+    # number of lines can hide an owner answer that the staged hash no longer covers
+    if len(lines) < a["total"] or prefix_hash(lines, a["total"]) != a["total_hash"]:
+        raise AnswersRewritten("answers rewritten")
+    if len(lines) == a["total"]:
+        return None
+    pending, bad = parse_pending(lines[a["total"]:])
+    by_id = {d["id"]: dict(d) for d in snap["decisions"] if d.get("status") in ("open", "overdue")}
+    bad += apply_answers(by_id, pending)
+    won = sorted(i for i in ids if (by_id.get(i) or {}).get("status") == "answered")
+    if not won:
+        return None
+    ph = prefix_hash(lines, len(lines))
+    return {"decisions": [by_id[d["id"]] if (by_id.get(d["id"]) or {}).get("status") == "answered" else d for d in snap["decisions"]],
+            "answers": dict(a, total=len(lines), applied=len(lines), applied_hash=ph, total_hash=ph, pending=[],
+                            bad=list(a["bad"]) + bad),
+            "won": won}
+
+
 # ---------------------------------------------------------------- usage / hashes
-def collect_usage(root, timeout):
+USAGE_MIN = 0.5   # below this many seconds a scan cannot make progress worth its start-up: keep the previous numbers
+
+
+def _usage_at(u):
+    return C.parse_iso(u.get("at")) if isinstance(u, dict) else None
+
+
+USAGE_ALLOW = 2   # the label allowlist version project-map-usage.py stamps on its snapshot ("allow")
+
+
+def clean_usage(u):
+    """A usage dict from an earlier state is trusted only when it carries the counters-only label allowlist stamp; one from a
+    3.3.0 development build may hold free-text job labels (a Codex user-message excerpt, a title), so its job list is
+    dropped (the totals and per-model rows stay). -> u itself when it is current."""
+    if not isinstance(u, dict) or u.get("allow") == USAGE_ALLOW:
+        return u
+    return dict(u, jobs=[])
+
+
+def stale_usage(prev):
+    """The previous usage numbers, marked stale with their ORIGINAL as-of time ("at"), or None when there are none."""
+    if not (isinstance(prev, dict) and isinstance(prev.get("totals"), dict)):
+        return None
+    u = {k: v for k, v in clean_usage(prev).items() if k != "partial"}
+    u["stale"] = True
+    return u
+
+
+def collect_usage(root, timeout, prev=None):
+    """Usage snapshot for the state. NEVER raises and never makes its caller fail: a complete scan gives the fresh snapshot
+    (no marker); a scan that ran out of budget (the script hands back its last complete result, "partial"), a timeout, a crash
+    or a skipped scan (timeout < USAGE_MIN) gives the newest previous numbers (the script's last complete result or `prev`,
+    the state's usage) with `stale: true` and their original as-of time in "at"; no numbers at all give None.
+    PM_USAGE_SKIP=1 (tests, 'no usage') gives None."""
     if os.environ.get("PM_USAGE_SKIP"):
         return None
-    try:
-        r = subprocess.run([sys.executable, os.path.join(HERE, "project-map-usage.py"), root, "--max-jobs", "15"],
-                           capture_output=True, text=True, timeout=max(timeout, 1.0), env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
-        return C.loads(r.stdout)["snapshot_for_state"]
-    except Exception:   # noqa: BLE001
+    got = None
+    if timeout >= USAGE_MIN:
+        try:
+            r = subprocess.run([sys.executable, os.path.join(HERE, "project-map-usage.py"), root, "--max-jobs", "15",
+                                "--budget", "%.2f" % max(timeout - 0.35, 0.15)],
+                               capture_output=True, text=True, timeout=timeout, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+            o = C.loads(r.stdout)
+            snap = o.get("snapshot_for_state")
+            if isinstance(snap, dict):
+                if not o.get("partial") and not snap.get("partial"):
+                    return snap
+                got = snap
+        except Exception:   # noqa: BLE001 - timeout, crash, garbage: fall back to the previous numbers
+            pass
+    cands = [u for u in (stale_usage(got), stale_usage(prev)) if u]
+    if not cands:
         return None
+    return max(cands, key=lambda u: (_usage_at(u).timestamp() if _usage_at(u) else 0.0))
 
 
 def plugin_hashes():
@@ -641,7 +1082,7 @@ def plugin_hashes():
 
 
 # ---------------------------------------------------------------- the collector
-def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False, usage_timeout=60.0):
+def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False, usage_timeout=60.0, usage_until=None, usage_prev=None):
     """Build the complete snapshot (6.1). hash_deadline: absolute time.monotonic() limit for content hashing only.
     Raises GitCollectError, AnswersRewritten."""
     t = C.now()
@@ -668,9 +1109,10 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     heads_prev = (prev.get("judged_key") or {}).get("heads", {}) if isinstance(prev.get("judged_key"), dict) else {}
 
     repos, commits, sh, dirty, total_count = [], [], hashlib.sha256(), [], 0
+    rel_cache = {}
     for rp in ["."] + nested:
         ph = heads_prev.get(rp)
-        info, cnt, sig, dp, cm = collect_repo(root, rp, ph if isinstance(ph, str) and re.match(r"^[0-9a-f]{7,40}$", ph or "") else None, watch, git_timeout)
+        info, cnt, sig, dp, cm = collect_repo(root, rp, ph if isinstance(ph, str) and re.match(r"^[0-9a-f]{7,40}$", ph or "") else None, watch, git_timeout, rel_cache)
         commits += cm
         total_count += cnt
         repos.append(info)
@@ -686,7 +1128,7 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     lname = pj.get("ledger") if isinstance(pj.get("ledger"), str) else None
     ledger = parse_ledger(root, lname)
 
-    lines = read_answers(pm)
+    lines, tail = read_answers_ex(pm)
     ap, ah = prev["applied"], prev["applied_hash"]
     if prev["kind"] == "none":
         ap, ah = 0, C.sha256_bytes(b"")
@@ -702,10 +1144,15 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     expired = sorted(d["id"] for d in decs if d.get("status") in ("overdue", "defaulted"))
     th, eh = plugin_hashes()
     key = {"heads": {r["path"]: r["head"] for r in repos}, "branches": {r["path"]: r["branch"] for r in repos},
-           "status_hash": sh.hexdigest()[:12], "watch_hashes": {w["path"]: w["hash"] for w in wl},
+           "status_hash": sh.hexdigest()[:12],
+           "release": {r["path"]: r["release"]["key"] for r in repos if r.get("release")},
+           "watch_hashes": {w["path"]: w["hash"] for w in wl},
            "ledger_hash": ledger["hash"] if ledger else None, "answers_count": len(lines), "expired_ids": expired,
            "schema": C.SCHEMA_STATE}
-    usage = collect_usage(root, usage_timeout) if want_usage else None
+    usage = None
+    if want_usage:   # usage_until (absolute time.monotonic()) is evaluated NOW, after the git and hashing work above
+        ut = usage_timeout if usage_until is None else min(usage_timeout, usage_until - time.monotonic())
+        usage = collect_usage(root, max(ut, 0.0), usage_prev)
     snap = {
         "schema": "project-map-snapshot-1", "generation": None, "base": prev["gen"], "root": root, "facts_at": C.iso(t),
         "repos": repos, "commits": group_commits(commits, total_count),
@@ -713,7 +1160,7 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
                    "covered": covered, "total": total, "git_error": None},
         "dirty_paths": dirty[:20], "watch": wl, "watch_dropped": dropped, "ledger": ledger,
         "answers": {"total": len(lines), "applied": ap, "applied_hash": ah, "total_hash": prefix_hash(lines, len(lines)),
-                    "pending": pending, "bad": bad},
+                    "pending": pending, "bad": bad, "tail": tail},
         "decisions": decs, "usage": usage, "key": key, "prev_key": prev.get("judged_key"),
         "template_hash": th, "embed_hash": eh,
     }
@@ -721,13 +1168,46 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
 
 
 def compare_keys(judged, key, snap):
-    """judged vs fresh key -> {'moved': [names], 'git': bool, 'adopt': [paths], 'why': text}."""
+    """judged vs fresh key -> {'moved': [names], 'git': bool, 'adopt': [paths], 'why': text, 'incomplete': [paths]}.
+    'incomplete' = repositories whose fresh tag listing is partial, 'unverified' = repositories whose tags/sync read kept moving
+    (exhausted re-reads): script-owned coverage warnings, independent of 'moved'."""
     if not isinstance(judged, dict):
-        return {"moved": ["heads"], "git": True, "adopt": [], "why": "no judged key"}
+        return {"moved": ["heads"], "git": True, "adopt": [], "why": "no judged key", "incomplete": [], "unverified": []}
     moved, adopt = [], []
     for k in ("heads", "branches", "status_hash", "ledger_hash", "answers_count", "expired_ids", "schema"):
         if key.get(k) != judged.get(k) and (k in judged or k in ("heads",)):
             moved.append(k)
+    # release (3.3.0): a key judged before 3.3.0 has no "release" entry; that forces ONE re-judgement, after which the
+    # new key is stored. Raw behind counts and recent tags are not in the key, so they never re-judge.
+    rel_why = []
+    fresh_rel = key.get("release") or {}
+    incomplete = sorted(p for p, v in fresh_rel.items() if isinstance(v, dict) and v.get("partial"))
+    unverified = sorted(p for p, v in fresh_rel.items() if isinstance(v, dict) and v.get("unverified"))
+    if "release" not in judged:
+        moved.append("release")
+        rel_why.append("tags and branch sync not yet judged")
+    elif judged.get("release") != key.get("release"):
+        # the entries include n and the partial flag, so a tag-count or coverage change (complete -> partial included) is
+        # a move. An UNCHANGED partial entry (same prefix digest, count, sync, partial flag) is not: it is incomplete
+        # coverage the scripts own and report (`incomplete`, the release line), not new evidence for a paid judgement.
+        moved.append("release")
+        if incomplete:
+            rel_why.append("tag list too large to verify")
+        jr, nr = judged.get("release") or {}, key.get("release") or {}
+        paths = set(jr) | set(nr)
+        if any((jr.get(p) or {}).get("tags") != (nr.get(p) or {}).get("tags") for p in paths):
+            rel_why.append("tags changed")
+        if any({k: v for k, v in (jr.get(p) or {}).items() if k not in ("tags", "n", "partial", "unverified")}
+               != {k: v for k, v in (nr.get(p) or {}).items() if k not in ("tags", "n", "partial", "unverified")} for p in paths):
+            rel_why.append("branch sync changed")
+        if not rel_why:
+            rel_why.append("tag count or coverage changed")
+    # a closure by events that publication deferred because answers.jsonl ended in an uncommitted record (closure_deferred in
+    # the judged key): once that tail is committed or removed, the map re-judges so the owner's answer can win or the closure
+    # can be made again. While the tail is still there nothing moves (the owner is still writing).
+    dfr = judged.get("closure_deferred")
+    deferred_moved = sorted(i for i in dfr if isinstance(i, str)) if isinstance(dfr, list) \
+        and not (snap.get("answers") or {}).get("tail") else []
     jw, nw = judged.get("watch_hashes", {}), key["watch_hashes"]
     changed = sorted(p for p in nw if p in jw and "partial" not in (jw[p], nw[p]) and jw[p] != nw[p])
     adopt = sorted(p for p in nw if jw.get(p) == "partial" and nw[p] != "partial")
@@ -743,15 +1223,22 @@ def compare_keys(judged, key, snap):
         why.append("working tree changed")
     if "watch_hashes" in moved:
         why.append("watch changed: " + ", ".join(changed[:3]) if changed else "watch set changed")
+    if "release" in moved:
+        why.append(" and ".join(rel_why) or "tags changed")
     if "ledger_hash" in moved:
         why.append("ledger changed")
     if "answers_count" in moved:
         why.append("%d pending answers" % max(len(snap["answers"]["pending"]), 1))
+    if deferred_moved:
+        moved.append("closure_deferred")
+        if "answers_count" not in moved[:-1]:
+            why.append("answers pending: closure of %s was deferred past an uncommitted answer tail" % ", ".join(deferred_moved))
     if "expired_ids" in moved:
         why.append("deadline passed: " + ", ".join(snap["key"]["expired_ids"] or judged.get("expired_ids", [])))
     if "schema" in moved:
         why.append("schema")
-    return {"moved": moved, "git": any(m in GIT_KEYS for m in moved), "adopt": adopt, "why": "; ".join(why)}
+    return {"moved": moved, "git": any(m in GIT_KEYS for m in moved), "adopt": adopt, "why": "; ".join(why),
+            "incomplete": incomplete, "unverified": unverified}
 
 
 # ---------------------------------------------------------------- pack (6.2)
@@ -766,8 +1253,30 @@ def build_pack(snap, inv_name):
     p["prev_key_digest"] = C.digest(snap["prev_key"]) if snap.get("prev_key") else None
     p["answers"].pop("applied_hash", None)
     p["answers"].pop("total_hash", None)
+    p["answers"].pop("tail", None)
+    for d in p["decisions"]:   # the script's verdict on each decision's resolves_when (the model never has to guess)
+        if isinstance(d, dict) and d.get("status") in ("open", "overdue") and d.get("resolves_when"):
+            try:
+                ok, _ev, _unmet, why = VAL.evaluate_resolves_when_ex(snap["root"], snap, d["resolves_when"])
+                d["resolved"] = bool(ok)
+                if why:   # a predicate that could not be established says so: unknown is not the same as "not yet"
+                    d["resolved_why"] = C.trim("; ".join(why), 100)
+            except Exception:   # noqa: BLE001 - an evaluation that cannot run is "not resolved"
+                d["resolved"] = False
+        if isinstance(d, dict) and isinstance(d.get("resolves_when"), list):
+            # the identity of a named tag belongs to the script's predicates (snapshot, state); the model sees and copies
+            # only the public fields, so a verbatim copy of a carried predicate is the predicate it was raised with
+            d["resolves_when"] = VAL.strip_tids(d["resolves_when"])
     for r in p["repos"]:
         r.pop("recent_files", None)
+        rl = r.get("release")
+        if isinstance(rl, dict):
+            r["release_line"] = rl.get("line", "")
+            rl.pop("line", None)
+            rl.pop("key", None)
+            for ht in rl.get("head_tags") or []:
+                if isinstance(ht, dict):
+                    ht.pop("tid", None)   # an identity for the script's predicates; the model names a tag by what it sees
     tr = {"items": 0, "watch": 0, "ledger": False, "answers": 0, "decisions": 0, "usage": False}
     p["trimmed"] = tr
 
@@ -821,17 +1330,31 @@ def build_pack(snap, inv_name):
             p["usage"] = {k: v for k, v in p["usage"].items() if k not in ("by_model", "jobs")}
             tr["usage"] = True
 
-    steps = [lambda: cut_items(5), lambda: cut_items(2), lambda: cut_items(1), lambda: cut_items(0), cut_watch,
+    def cut_recent():
+        for r in p["repos"]:
+            if isinstance(r.get("release"), dict) and r["release"].get("recent_tags"):
+                r["release"]["recent_tags"] = []
+                r["release"]["recent_trimmed"] = True
+
+    def cut_release():   # detail goes before the script-owned line does: the line stays in every later step
+        for r in p["repos"]:
+            if isinstance(r.get("release"), dict):
+                r["release"] = {"head_tags_total": r["release"].get("head_tags_total"), "trimmed": True}
+
+    steps = [cut_recent, lambda: cut_items(5), lambda: cut_items(2), lambda: cut_items(1), lambda: cut_items(0), cut_watch,
              cut_ledger, cut_notes, drop_answers, cut_decisions, cut_usage,
              lambda: p.update(dirty_paths=[]), lambda: p["watch"].__setitem__(slice(40, None), []),
              lambda: p["repos"].__setitem__(slice(8, None), []), lambda: p.update(watch_dropped=p["watch_dropped"][:5]),
              lambda: p["commits"].update(days=p["commits"]["days"][:3]),
              lambda: p["decisions"].__setitem__(slice(6, None), []),
              lambda: p.update(dirty_paths=[], watch=[], watch_dropped=[], ledger=None),
+             cut_release,
              lambda: p["answers"].update(pending=[], bad=[]),
              lambda: p["commits"].update(days=[]),
-             lambda: p.update(decisions=[{"id": d.get("id"), "status": d.get("status")} for d in p["decisions"]]),
-             lambda: p.update(repos=[{"path": r.get("path"), "vcs": r.get("vcs"), "head": r.get("head")} for r in p["repos"][:4]])]
+             lambda: p.update(decisions=[dict({"id": d.get("id"), "status": d.get("status")},
+                                                           **({"resolved": d["resolved"]} if "resolved" in d else {})) for d in p["decisions"]]),
+             lambda: p.update(repos=[{"path": r.get("path"), "vcs": r.get("vcs"), "head": r.get("head"),
+                                                    "release_line": r.get("release_line")} for r in p["repos"][:4]])]
     for s in steps:
         if size() <= PACK_MAX:
             break

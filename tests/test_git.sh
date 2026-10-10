@@ -5,7 +5,10 @@
 
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 SCRIPTS=$(cd "$HERE/../scripts" && pwd -P)
-W=/private/tmp/claude-501/-Users-demo/pmgit-test/scratchpad/w1
+# a private scratch directory per run: two runs (or a leftover) can never share it, so no link is ever created through an old one
+W=$(mktemp -d "${TMPDIR:-/tmp}/pmgit.XXXXXX") || exit 1
+W=$(cd "$W" && pwd -P)
+trap 'rm -rf "$W"' EXIT
 R=$W/repo
 M=$W/markers
 H=$W/helpers
@@ -26,7 +29,6 @@ assert_clean() {
   if no_markers; then pass; else fail "$1 (helper executed: $(ls "$M" | tr '\n' ' '))"; rm -f "$M"/*; fi
 }
 
-rm -rf "$W"
 mkdir -p "$M" "$H" "$W/hooks"
 
 # ---- scratch repo (built BEFORE helpers are configured) ----------------------------
@@ -321,6 +323,144 @@ python3 -I "$SCRIPTS/pm_git.py" --agent "$R" show HEAD >/dev/null 2>&1; [ $? -eq
 python3 -I "$SCRIPTS/pm_git.py" --agent "$R" log -n 61 >/dev/null 2>&1; [ $? -eq 2 ] && pass || fail "python --agent rejects log -n 61"
 python3 -I "$SCRIPTS/pm_git.py" "$R" status >/dev/null 2>&1; [ $? -eq 2 ] && pass || fail "python without --agent rejected"
 assert_clean "python --agent rejections"
+
+# ---- 3.3.0 release-fact tuples: exact argv forms only, internal only --------------------
+TF='--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)'
+UF='--format=%(refname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)'
+BR=$(git -C "$R" symbolic-ref --short HEAD)
+git -C "$R" -c user.name=t -c user.email=t@t tag -a -m "annotated" rel-ann "$H0" 2>/dev/null
+git -C "$R" tag rel-light "$H0" 2>/dev/null
+ok_core "rel rev-parse --verify HEAD^{commit}" 0 "$R" rev-parse --verify --end-of-options 'HEAD^{commit}'
+[ "$COUT" = "$H0" ] && pass || fail "rel rev-parse verify value ($COUT)"
+ok_core "rel symbolic-ref --quiet HEAD" 0 "$R" symbolic-ref --quiet HEAD
+[ "$COUT" = "refs/heads/$BR" ] && pass || fail "rel symbolic-ref value ($COUT)"
+ok_core "rel rev-parse --is-shallow-repository" 0 "$R" rev-parse --is-shallow-repository
+[ "$COUT" = "false" ] && pass || fail "rel shallow value ($COUT)"
+ok_core "rel for-each-ref points-at HEAD" 0 "$R" for-each-ref --sort=refname "$TF" "--points-at=$H0" refs/tags
+case "$COUT" in *refs/tags/rel-ann*refs/tags/rel-light*) pass;; *) fail "rel points-at lists both tags ($COUT)";; esac
+case "$COUT" in *"refs/tags/rel-ann"*"tag"*"commit"*"$H0"*) pass;; *) fail "rel annotated tag peels to the commit ($COUT)";; esac
+ok_core "rel for-each-ref recent five" 0 "$R" for-each-ref --sort=refname --sort=-creatordate --count=5 "$TF" refs/tags
+ok_core "rel for-each-ref upstream metadata" 0 "$R" for-each-ref "$UF" "refs/heads/$BR"
+ok_core "rel literal upstream ref resolve, absent ref -> rc 128" 128 "$R" rev-parse --verify --end-of-options 'refs/remotes/origin/nope^{commit}'
+[ "$CCF" = 1 ] && pass || fail "rel failing upstream resolve is a collection failure for the generic policy"
+ok_core "rel literal local-branch ref resolves" 0 "$R" rev-parse --verify --end-of-options "refs/heads/$BR^{commit}"
+[ "$COUT" = "$H0" ] && pass || fail "rel literal ref resolve value ($COUT)"
+RT='--format=%(refname)%00%(objecttype)%00%(objectname)'
+ok_core "rel ref existence/type query on a literal ref" 0 "$R" for-each-ref "$RT" "refs/heads/$BR"
+case "$COUT" in "refs/heads/$BR"*commit*"$H0"*) pass;; *) fail "rel ref type value ($COUT)";; esac
+ok_core "rel ref existence/type query, absent ref -> empty" 0 "$R" for-each-ref "$RT" refs/remotes/origin/nope
+[ -z "$COUT" ] && pass || fail "rel absent ref gives no row ($COUT)"
+rej_core "rel rev-parse verify @{upstream} (no longer allowed)" "$R" rev-parse --verify --end-of-options '@{upstream}^{commit}'
+rej_core "rel rev-parse verify refs/tags ref" "$R" rev-parse --verify --end-of-options 'refs/tags/rel-light^{commit}'
+rej_core "rel rev-parse verify upstream ref with @{" "$R" rev-parse --verify --end-of-options 'refs/heads/a@{1}^{commit}'
+rej_core "rel rev-parse verify upstream ref wildcard" "$R" rev-parse --verify --end-of-options 'refs/remotes/*^{commit}'
+rej_core "rel rev-parse verify upstream ref dotdot" "$R" rev-parse --verify --end-of-options 'refs/heads/a..b^{commit}'
+rej_core "rel rev-parse verify upstream ref space" "$R" rev-parse --verify --end-of-options 'refs/heads/a b^{commit}'
+rej_core "rel rev-parse verify upstream ref bare prefix" "$R" rev-parse --verify --end-of-options 'refs/remotes/^{commit}'
+rej_core "rel for-each-ref type query refs/tags" "$R" for-each-ref "$RT" refs/tags/rel-light
+rej_core "rel for-each-ref type query wildcard" "$R" for-each-ref "$RT" 'refs/heads/*'
+rej_core "rel for-each-ref type query two refs" "$R" for-each-ref "$RT" "refs/heads/$BR" refs/remotes/origin/x
+rej_core "rel for-each-ref type query other format" "$R" for-each-ref '--format=%(objecttype)' "refs/heads/$BR"
+ok_core "rel rev-list --left-right --count" 0 "$R" rev-list --left-right --count "$H0...$H1"
+[ "$COUT" = "$(printf '1\t0')" ] && pass || fail "rel left-right count value ($COUT)"
+git clone -q "$R" "$W/det" 2>/dev/null; git -C "$W/det" checkout -q --detach 2>/dev/null
+ok_core "rel symbolic-ref detached -> rc 1" 1 "$W/det" symbolic-ref --quiet HEAD
+git init -q "$W/unb"
+ok_core "rel unborn: HEAD verify fails" 128 "$W/unb" rev-parse --verify --end-of-options 'HEAD^{commit}'
+ok_core "rel unborn: symbolic-ref works" 0 "$W/unb" symbolic-ref --quiet HEAD
+rej_core "rel symbolic-ref without --quiet" "$R" symbolic-ref HEAD
+rej_core "rel symbolic-ref other ref" "$R" symbolic-ref --quiet refs/heads/x
+rej_core "rel symbolic-ref extra arg" "$R" symbolic-ref --quiet HEAD extra
+rej_core "rel symbolic-ref -d" "$R" symbolic-ref -d HEAD
+rej_core "rel rev-parse verify without end-of-options" "$R" rev-parse --verify 'HEAD^{commit}'
+rej_core "rel rev-parse verify arbitrary rev" "$R" rev-parse --verify --end-of-options 'main^{commit}'
+rej_core "rel rev-parse verify extra arg" "$R" rev-parse --verify --end-of-options 'HEAD^{commit}' x
+rej_core "rel rev-parse --git-dir" "$R" rev-parse --git-dir
+rej_core "rel rev-parse upstream abbrev" "$R" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
+rej_core "rel for-each-ref no args" "$R" for-each-ref
+rej_core "rel for-each-ref bad oid (short)" "$R" for-each-ref --sort=refname "$TF" "--points-at=${H0:0:12}" refs/tags
+rej_core "rel for-each-ref bad oid (upper)" "$R" for-each-ref --sort=refname "$TF" "--points-at=$(echo "$H0" | tr a-f A-F)" refs/tags
+rej_core "rel for-each-ref points-at HEAD" "$R" for-each-ref --sort=refname "$TF" --points-at=HEAD refs/tags
+rej_core "rel for-each-ref other format" "$R" for-each-ref --sort=refname '--format=%(refname)' "--points-at=$H0" refs/tags
+rej_core "rel for-each-ref extra arg" "$R" for-each-ref --sort=refname "$TF" "--points-at=$H0" refs/tags --count=1
+rej_core "rel for-each-ref refs/heads for tags form" "$R" for-each-ref --sort=refname "$TF" "--points-at=$H0" refs/heads
+rej_core "rel for-each-ref count=6" "$R" for-each-ref --sort=refname --sort=-creatordate --count=6 "$TF" refs/tags
+rej_core "rel for-each-ref recent wildcard" "$R" for-each-ref --sort=refname --sort=-creatordate --count=5 "$TF" 'refs/tags/*'
+rej_core "rel for-each-ref upstream refs/tags" "$R" for-each-ref "$UF" refs/tags/rel-light
+rej_core "rel for-each-ref upstream-metadata form refs/remotes" "$R" for-each-ref "$UF" refs/remotes/origin/main
+rej_core "rel for-each-ref upstream bare refs/heads" "$R" for-each-ref "$UF" refs/heads/
+rej_core "rel for-each-ref upstream wildcard" "$R" for-each-ref "$UF" 'refs/heads/*'
+rej_core "rel for-each-ref upstream char class" "$R" for-each-ref "$UF" 'refs/heads/[a]'
+rej_core "rel for-each-ref upstream question mark" "$R" for-each-ref "$UF" 'refs/heads/a?'
+rej_core "rel for-each-ref upstream dotdot" "$R" for-each-ref "$UF" 'refs/heads/a..b'
+rej_core "rel for-each-ref upstream space" "$R" for-each-ref "$UF" 'refs/heads/a b'
+rej_core "rel for-each-ref upstream newline" "$R" for-each-ref "$UF" "refs/heads/a
+b"
+rej_core "rel for-each-ref upstream control char" "$R" for-each-ref "$UF" "refs/heads/a$(printf '\001')b"
+rej_core "rel for-each-ref upstream tab" "$R" for-each-ref "$UF" "refs/heads/a$(printf '\t')b"
+rej_core "rel for-each-ref upstream .lock" "$R" for-each-ref "$UF" 'refs/heads/x.lock'
+rej_core "rel for-each-ref upstream hidden component" "$R" for-each-ref "$UF" 'refs/heads/.x'
+rej_core "rel for-each-ref upstream trailing slash" "$R" for-each-ref "$UF" 'refs/heads/x/'
+rej_core "rel for-each-ref upstream @{" "$R" for-each-ref "$UF" 'refs/heads/a@{1}'
+rej_core "rel for-each-ref upstream two refs" "$R" for-each-ref "$UF" "refs/heads/$BR" "refs/heads/x"
+rej_core "rel rev-list left-right short oid" "$R" rev-list --left-right --count "${H0:0:12}...${H1:0:12}"
+rej_core "rel rev-list left-right HEAD" "$R" rev-list --left-right --count 'HEAD...@{upstream}'
+rej_core "rel rev-list left-right two dots" "$R" rev-list --left-right --count "$H0..$H1"
+rej_core "rel rev-list left-right missing --count" "$R" rev-list --left-right "$H0...$H1"
+rej_core "rel rev-list left-right extra arg" "$R" rev-list --left-right --count "$H0...$H1" --
+rej_core "rel rev-list left-right option-like" "$R" rev-list --left-right --count "--all...$H1"
+rej_core "rel rev-list left-right upper hex" "$R" rev-list --left-right --count "$(echo "$H0" | tr a-f A-F)...$H1"
+rej_core "rel rev-parse is-shallow extra" "$R" rev-parse --is-shallow-repository x
+# the agent wrapper never gained these: refused by the shell layer and by the python layer alike
+agent_rej "agent for-each-ref" "$R" for-each-ref
+agent_rej "agent for-each-ref refs/tags" "$R" for-each-ref refs/tags
+agent_rej "agent symbolic-ref" "$R" symbolic-ref --quiet HEAD
+agent_rej "agent rev-parse --verify" "$R" rev-parse --verify --end-of-options 'HEAD^{commit}'
+agent_rej "agent rev-parse --is-shallow-repository" "$R" rev-parse --is-shallow-repository
+agent_rej "agent rev-list --left-right" "$R" rev-list --left-right --count "$H0...$H1"
+for sub in for-each-ref symbolic-ref; do
+  python3 -I "$SCRIPTS/pm_git.py" --agent "$R" "$sub" --quiet HEAD >/dev/null 2>&1; [ $? -eq 2 ] && pass || fail "python --agent rejects $sub"
+done
+python3 -I "$SCRIPTS/pm_git.py" --agent "$R" rev-parse --is-shallow-repository >/dev/null 2>&1; [ $? -eq 2 ] && pass || fail "python --agent rejects rev-parse --is-shallow-repository"
+python3 -I "$SCRIPTS/pm_git.py" --agent "$R" rev-parse --verify --end-of-options 'HEAD^{commit}' >/dev/null 2>&1; [ $? -eq 2 ] && pass || fail "python --agent rejects rev-parse --verify"
+# the generic failure policy is unchanged: no blanket exception for rev-parse / rev-list / for-each-ref / symbolic-ref
+for sub in rev-parse rev-list for-each-ref symbolic-ref; do
+  python3 -I -c "
+import sys; sys.path.insert(0, '$SCRIPTS'); import pm_git
+sys.exit(0 if all(pm_git.collection_failure('$sub', rc) for rc in (1, 124, 127, 128)) else 1)" && pass || fail "collection_failure('$sub') has no answer rc"
+done
+# 3.3.0 round 3: legality of a future tag name (exact tuple refs/tags/<name>, script-internal only)
+ok_core "ref-format legal tag name -> 0" 0 "$R" check-ref-format refs/tags/v-future
+ok_core "ref-format legal tag with a slash -> 0" 0 "$R" check-ref-format refs/tags/release/2.0
+ok_core "ref-format bad:name -> 1" 1 "$R" check-ref-format refs/tags/bad:name
+ok_core "ref-format a..b -> 1" 1 "$R" check-ref-format refs/tags/a..b
+ok_core "ref-format name.lock -> 1" 1 "$R" check-ref-format refs/tags/name.lock
+rej_core "ref-format without the refs/tags/ prefix" "$R" check-ref-format v1
+rej_core "ref-format refs/heads/ prefix" "$R" check-ref-format refs/heads/x
+rej_core "ref-format --branch" "$R" check-ref-format --branch refs/tags/x
+rej_core "ref-format --allow-onelevel" "$R" check-ref-format --allow-onelevel refs/tags/x
+rej_core "ref-format two names" "$R" check-ref-format refs/tags/a refs/tags/b
+rej_core "ref-format bare prefix (empty name)" "$R" check-ref-format refs/tags/
+rej_core "ref-format option-like name via a leading dash arg" "$R" check-ref-format -refs/tags/x
+rej_core "ref-format no args" "$R" check-ref-format
+python3 -I "$SCRIPTS/pm_git.py" --agent "$R" check-ref-format refs/tags/x >/dev/null 2>&1; [ $? -eq 2 ] && pass || fail "python --agent rejects check-ref-format"
+agent_rej "check-ref-format via the wrapper" "$R" check-ref-format refs/tags/x
+python3 -I -c "
+import sys; sys.path.insert(0, '$SCRIPTS'); import pm_git as G
+names = ['bad:name', 'a..b', 'bad tag', 'trailing.', 'name.lock', '@{x}', '@', '', '.hidden', 'a/.b', 'a//b', 'a/', 'x~1', 'x^', 'x?', 'x*', 'x[', 'x\\\\y', 'x\x01y']
+ok = [n for n in names if G.tag_name_problem(n) is None]
+good = [n for n in ('v1.0.0', 'v-future', 'release/2.0', 'x@y', 'h\u00e9llo') if G.tag_name_problem(n)]
+print(ok, good); sys.exit(0 if not ok and not good else 1)" >/dev/null 2>&1 && pass || fail "tag_name_problem: illegal names refused, legal ones accepted"
+python3 -I -c "
+import sys; sys.path.insert(0, '$SCRIPTS'); import pm_git as G
+r = '$R'
+sys.exit(0 if [G.tag_name_git_ok(r, n) for n in ('v1', 'a..b', 'bad tag')] == [True, False, False] else 1)" && pass || fail "tag_name_git_ok follows the real git"
+# git missing: the answer is unknown (None), never a false verdict
+PYBIN=$(command -v python3)
+PATH=/nonexistent "$PYBIN" -I -c "
+import sys; sys.path.insert(0, '$SCRIPTS'); import pm_git as G
+sys.exit(0 if G.tag_name_git_ok('$R', 'v1') is None else 1)" && pass || fail "tag_name_git_ok without git is None"
+assert_clean "release-fact tuples"
 
 echo "total $((PASS + FAIL)) pass $PASS fail $FAIL"
 [ "$FAIL" -eq 0 ]

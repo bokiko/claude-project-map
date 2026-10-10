@@ -29,6 +29,10 @@ import pm_validate as VAL    # noqa: E402
 TEMPLATE = os.path.join(HERE, "project-map-template.html")
 STATE_MAX = 65536
 PLAN_OUT_MAX = 65536
+USAGE_RENDER_MARGIN = 0.7   # seconds of the --deadline kept back for rendering and publishing when usage is collected
+
+
+CARRY_KEYS = ("id", "q", "options", "recommended", "default", "hard_rule", "deadline", "ready")   # a decision's model-owned fields
 
 
 class EmbedError(Exception):
@@ -196,20 +200,99 @@ def finish_files(S, snap, plan, judgement, extra, tpl=TEMPLATE):
 
 
 # ---------------------------------------------------------------- normal mode
-def light_stale(root, snap, judged_at):
-    n = 0
-    for r in snap["repos"]:
-        if r.get("vcs") != "git" or not r.get("head"):
-            continue
-        repo = root if r["path"] == "." else os.path.join(root, r["path"])
-        try:
-            rc, out = G.run(repo, "rev-parse", "HEAD", timeout=5.0)
-            if rc == 0 and out.strip()[:12] != r["head"]:
-                rc2, o2 = G.run(repo, "rev-list", "--count", "%s..HEAD" % r["head"], timeout=5.0)
-                n += int(o2.strip()) if rc2 == 0 and o2.strip().isdigit() and int(o2.strip()) else 1
-        except G.GitArgError:
-            continue
-    return {"judged_at": judged_at, "commits_since": n, "why": "%d new commits" % n} if n else None
+def _scoped_new_commits(repo, head12):
+    """Commits under this sub-folder since the judged scoped head (the same path-scoped log collection uses): 0 when the
+    scoped head is unchanged. head12 None = the judged package had NO scoped history: any scoped commit now is new
+    activity (their count, at most 200). Raises GitCollectError / BudgetOut when the log cannot be read."""
+    recs = K.log_records(repo, 200, ["."], 5.0)
+    if not head12:
+        return len(recs)
+    if recs and recs[0][0][:12] == head12:
+        return 0
+    idx = next((i for i, x in enumerate(recs) if x[0][:12] == head12), None)
+    return idx if idx else 1
+
+
+def light_stale(root, snap, judged_at, clock=None):
+    """The judged world versus now: new commits, moved tags / branch sync. What cannot be verified is reported as
+    unverified (so the next run re-judges); an exhausted deadline raises C.Deadline."""
+    n, rel_moved = 0, []
+    if clock is not None and clock.total:
+        K.set_budget(clock.t0 + clock.total)
+    try:
+        for r in snap["repos"]:
+            if r.get("vcs") != "git":
+                continue
+            repo = root if r["path"] == "." else os.path.join(root, r["path"])
+            if r.get("scope"):
+                # sub-folder ROOT: r["head"] is the last PATH-SCOPED commit (null for a package with no commit of its own
+                # yet), so compare scoped activity; the baseline being null does not skip the check
+                try:
+                    if r.get("head"):
+                        n += _scoped_new_commits(repo, r["head"])
+                    else:
+                        rc_h, _o = G.run(repo, "rev-parse", "HEAD", timeout=5.0)
+                        if rc_h == 0:   # the shared repository has commits: has the package gained its first one?
+                            n += _scoped_new_commits(repo, None)
+                except G.GitArgError:
+                    pass
+                except K.BudgetOut:
+                    raise C.Deadline("deadline")
+                except K.GitCollectError:
+                    if clock is not None:
+                        clock.check()
+                    rel_moved.append("activity could not be re-verified (unverified)")
+            elif r.get("head"):
+                try:
+                    rc, out = G.run(repo, "rev-parse", "HEAD", timeout=5.0)
+                    if rc == 0 and out.strip()[:12] != r["head"]:
+                        rc2, o2 = G.run(repo, "rev-list", "--count", "%s..HEAD" % r["head"], timeout=5.0)
+                        n += int(o2.strip()) if rc2 == 0 and o2.strip().isdigit() and int(o2.strip()) else 1
+                except G.GitArgError:
+                    continue
+            # tags and branch sync may have moved while the judgement was written: recheck them with HEAD, independently
+            # of the scoped activity above (the release key is the SHARED repository's)
+            want = (snap.get("key") or {}).get("release", {}).get(r["path"])
+            if want is None:
+                continue
+            try:
+                now = K.collect_release(repo, 5.0, shared=bool((r.get("release") or {}).get("shared")))
+            except K.BudgetOut:
+                raise C.Deadline("deadline")
+            except K.GitCollectError:
+                if clock is not None:
+                    clock.check()
+                rel_moved.append("tags and branch sync could not be re-verified (unverified)")
+                continue
+            if now is None:
+                rel_moved.append("tags and branch sync unavailable on re-check (unverified)")
+                continue
+            nk = now["key"]
+            if nk != want:
+                if nk.get("tags") != want.get("tags"):
+                    rel_moved.append("tags changed")
+                if {k: v for k, v in nk.items() if k not in ("tags", "n", "partial", "unverified")} != {k: v for k, v in want.items() if k not in ("tags", "n", "partial", "unverified")}:
+                    rel_moved.append("branch sync changed")
+                if nk.get("n") != want.get("n") or bool(nk.get("partial")) != bool(want.get("partial")):
+                    rel_moved.append("tag count or coverage changed (unverified)")
+            if now.get("inconsistent"):
+                # independent of the key comparison: refs that kept moving during the recheck were never verified, so the
+                # judged world cannot be certified current even when the (unknown) key happens to match
+                rel_moved.append("tags and branch sync kept changing during the re-check (unverified)")
+            if nk.get("partial"):
+                # independent of every comparison above: a partial tag listing (more tags than were read) can never
+                # certify the judged world, whatever else is equal
+                rel_moved.append("tag list too large to verify (unverified)")
+    finally:
+        if clock is not None and clock.total:
+            K.set_budget(None)
+    if clock is not None:
+        clock.check()
+    why = []
+    if n:
+        why.append("%d new commits" % n)
+    why += [w for w in dict.fromkeys(rel_moved) if w]
+    return {"judged_at": judged_at, "commits_since": n, "why": " and ".join(why)} if why else None
 
 
 def _read(path, maxb=None):
@@ -319,7 +402,7 @@ def embed_normal(root, inv_name, clock):
                 with open(full_p, "rb") as fh:
                     stage_files["invocation/" + os.path.relpath(full_p, stage)] = fh.read()
         n = (prev["run"]["n"] if prev else (prevp["state"].get("run", {}).get("n", 0) if prevp["kind"] == "legacy" and isinstance(prevp["state"].get("run"), dict) and isinstance(prevp["state"]["run"].get("n"), int) else 0)) + 1
-        stale = light_stale(root, snap, snap["facts_at"])
+        stale = light_stale(root, snap, snap["facts_at"], clock)
         th, eh = K.plugin_hashes()
         # the judged key must describe the lists the judgement now declares: a path the model added is hashed now,
         # a ledger binding that changed gets its new hash; everything else keeps the hashes of the judged world
@@ -334,6 +417,35 @@ def embed_normal(root, inv_name, clock):
         if not ((led and sled and led["path"] == sled["path"]) or (not led and not sled)):
             key["ledger_hash"] = led["hash"] if led else None
         snap2 = dict(snap, template_hash=th, embed_hash=eh, key=key)
+        # an owner answer that arrived while the judgement was written outranks a closure by events for the same decision:
+        # re-read answers.jsonl under the lock (never written, never consumed as bad input)
+        notes = []
+        closing = [d["id"] for d in J.get("decisions", []) if isinstance(d.get("overtaken"), dict)]
+        if closing:
+            try:
+                # ONE read serves both: the unterminated-tail flag and the late answers describe the same bytes, so a record
+                # finished between two reads can neither be missed nor be seen by one check and not the other
+                lines, tail = K.read_answers_ex(pm)
+                late = K.late_answers(pm, snap, closing, image=lines)
+            except K.AnswersUnreadable as ex:
+                raise EmbedError("%s while the judgement was written: run facts again" % ex)
+            except K.AnswersRewritten:
+                raise EmbedError("answers rewritten while the judgement was written: run facts again")
+            if late:
+                snap2 = dict(snap2, decisions=late["decisions"], answers=late["answers"])
+                notes.append("owner answer for %s arrived during the judgement and wins over its closure by events; "
+                             "the map is stale for the new answers, run /project-map again" % ", ".join(late["won"]))
+            left = [i for i in closing if not late or i not in late["won"]]
+            if tail and left:
+                # answers.jsonl ends in a record that is not committed yet (no newline): it may be the owner's answer to the
+                # very decision the judgement closes, and its bytes are never applied or hashed. The closure waits: the
+                # decision is published still open (a verbatim copy of the staged one), the key remembers it, and the next
+                # facts run re-judges once the tail is committed or removed. A COMMITTED late answer still wins above.
+                sdec = {x["id"]: x for x in snap.get("decisions", []) if isinstance(x, dict)}
+                J["decisions"] = [({k: copy.deepcopy(sdec[d["id"]][k]) for k in CARRY_KEYS if k in sdec[d["id"]]}
+                                   if d["id"] in left and d["id"] in sdec else d) for d in J["decisions"]]
+                snap2 = dict(snap2, key=dict(snap2["key"], closure_deferred=sorted(left)))
+                notes.append("uncommitted answer tail; events closure of %s deferred" % ", ".join(sorted(left)))
         box = {}
 
         def make(genstr):
@@ -351,7 +463,7 @@ def embed_normal(root, inv_name, clock):
         genstr = publish(pm, make, bool(legacy), clock)
         S = box["S"]
         cache_merge(pm, K_cache(pm))
-        return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), stale
+        return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), stale, notes
     finally:
         lock.release()
 
@@ -382,11 +494,19 @@ def embed_mechanical(root, clock):
         gt = min(5.0, max(clock.remaining(), 0.5)) if total else 20.0
         K.set_budget(clock.t0 + clock.total if clock.total else None)
         try:
-            at0 = C.parse_iso(S0["identity"].get("snapshot_at"))
-            want_usage = S0.get("usage") is None or at0 is None or (C.now() - at0).total_seconds() >= 3600   # D7
-            snap = K.collect(root, prev, hd, cache, git_timeout=gt, want_usage=want_usage, usage_timeout=clock.remaining(60.0) if total else 60.0)
+            # D7: usage is re-collected when its OWN as-of time is over an hour old (not the map's: a refresh that kept stale
+            # numbers must retry on the next one). Usage never decides whether the refresh happens: it gets what is left of
+            # the budget minus a render margin, and a timeout keeps the previous numbers (marked stale).
+            u0 = K.clean_usage(S0.get("usage")) if isinstance(S0.get("usage"), dict) else None
+            ua = C.parse_iso(u0.get("at")) if u0 else None
+            want_usage = u0 is None or ua is None or (C.now() - ua).total_seconds() >= 3600
+            margin = max(USAGE_RENDER_MARGIN, total * 0.2) if total else 0.0
+            snap = K.collect(root, prev, hd, cache, git_timeout=gt, want_usage=want_usage, usage_timeout=60.0,
+                             usage_until=(clock.t0 + total - margin) if total else None, usage_prev=u0)
         except K.GitCollectError as ex:
             raise EmbedError("git_error: %s" % ex)
+        except K.AnswersUnreadable as ex:
+            raise EmbedError(str(ex))
         except K.AnswersRewritten:
             raise EmbedError("answers rewritten")
         except K.BudgetOut:
@@ -407,10 +527,25 @@ def embed_mechanical(root, clock):
             T["identity"]["generation"], T["identity"]["snapshot_at"] = genstr, snap["facts_at"]
             if snap.get("usage") is not None:
                 T["usage"] = snap["usage"]
+            elif isinstance(T.get("usage"), dict):
+                T["usage"] = K.clean_usage(T["usage"])   # numbers kept from an older build lose any free-text job label
             T["coverage"] = {"coverage": snap["status"]["coverage"], "covered": snap["status"]["covered"], "total": snap["status"]["total"]}
             T["stale"] = ({"judged_at": S0.get("judged_at"), "commits_since": snap["commits"]["count"], "why": cmp["why"]}
                           if cmp["moved"] else None)
             T["template_hash"], T["embed_hash"], T["judged_key"] = th, eh, jk
+            # a closed decision (answered / defaulted / overtaken) lives for one published generation, S0 was it: this refresh
+            # drops it and retires its id exactly as the next judgement would. Newly answered decisions are not touched: an
+            # answer not yet applied (answers.applied) stays pending in answers.jsonl for the next judgement.
+            shown = [d["id"] for d in T["decisions"] if d.get("status") in VAL.CLOSED_ST]
+            if shown:
+                T["decisions"] = [d for d in T["decisions"] if d.get("status") not in VAL.CLOSED_ST]
+                VAL.retire_decisions(T, shown)
+            fresh = {r["path"]: r["release"] for r in snap["repos"] if isinstance(r.get("release"), dict)}
+            for r_ in T["repos"]:   # tags and sync are facts, refreshed on every render; the judgement stays as it was
+                if r_.get("path") in fresh:
+                    r_["release"] = fresh[r_["path"]]
+                else:
+                    r_.pop("release", None)
             plan = C.loads(C.read_pinned(pm, prev["src"], "plan.json") or b"{}")
             J = C.loads(C.read_pinned(pm, prev["src"], "judgement.json") or b"{}")
             return {k: (v_.encode("utf-8", "replace") if isinstance(v_, str) else v_)
@@ -424,7 +559,7 @@ def embed_mechanical(root, clock):
             raise Superseded(cur, now_cur)
         genstr = publish(pm, make, False, clock)
         cache_merge(pm, cache, cur, genstr)
-        return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), None
+        return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), None, []
     finally:
         lock.release()
 
@@ -468,12 +603,14 @@ def main(argv):
             raise EmbedError("need an absolute project root")
         root = os.path.realpath(root).rstrip("/")
         if mech:
-            genstr, size, stale = embed_mechanical(root, clock)
+            genstr, size, stale, notes = embed_mechanical(root, clock)
         else:
-            genstr, size, stale = embed_normal(root, pos[1], clock)
+            genstr, size, stale, notes = embed_normal(root, pos[1], clock)
         print("PM_EMBED_OK gen %s %d" % (genstr, size))
         if stale:
             print("PM_EMBED_STALE %s" % stale["why"])
+        for n in notes:
+            print("PM_EMBED_NOTE %s" % n)
         return 0
     except Superseded as s:
         print("SUPERSEDED base %s current %s" % (s.base or "none", s.cur or "none"))

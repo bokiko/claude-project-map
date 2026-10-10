@@ -27,9 +27,11 @@ sys.dont_write_bytecode = True
 
 import pm_common as C      # noqa: E402
 import pm_collect as K     # noqa: E402
+import pm_validate as VAL  # noqa: E402
 
 EMBED_PY = os.path.join(HERE, "project-map-embed.py")
 HOUR = 3600.0
+USAGE_CAP = 10.0   # seconds the staging step gives the usage scan (it resumes where it stopped on the next run)
 
 
 class Out(Exception):
@@ -138,6 +140,7 @@ def sweep(pm, root, keep=()):
     active, terminal = bind_refs(root)
     now = time.time()
     leftovers(pm)
+    C.sweep_legacy_usage(pm)   # 3.3.0: the usage cache moved out of ROOT (it holds transcript-derived data)
     for n in os.listdir(pm):
         p = os.path.join(pm, n)
         if C.INV_RE.match(n) and os.path.isdir(p) and not os.path.islink(p) and n not in keep and n not in active:
@@ -231,6 +234,22 @@ def derive_plan(J, name):
     return {"schema": C.SCHEMA_PLAN, "generation": name, "origin": "proposed", "phases": phases}
 
 
+def staged_judgement(prev):
+    """judgement.in.json: the previously accepted judgement, minus the decisions that are retired in the pinned state. A
+    mechanical refresh retires a closed decision (answered, defaulted, overtaken) from the state, the brief and the pack, and its
+    id is never reused; the judgement it left behind still lists it, so an agent that copied that file verbatim would be refused
+    (`decision id D-00N was retired`). Only decisions[] changes; open and still-listed closed decisions stay as they were."""
+    J = prev["judgement"]
+    if not isinstance(J, dict) or not isinstance(J.get("decisions"), list):
+        return J
+    S = prev["state"] if isinstance(prev.get("state"), dict) else {}
+    listed = {d.get("id") for d in prev.get("decisions", []) if isinstance(d, dict)}
+    gone = VAL.retired_decision_ids(S) - listed
+    if not gone:
+        return J
+    return dict(J, decisions=[d for d in J["decisions"] if not (isinstance(d, dict) and d.get("id") in gone)])
+
+
 def make_staging(pm, root, prev, snap):
     os.makedirs(pm, exist_ok=True)
     for _ in range(50):
@@ -247,10 +266,10 @@ def make_staging(pm, root, prev, snap):
     snap = dict(snap, generation=name)
     if prev["kind"] == "v4":
         plan = dict(prev["plan"], generation=name)
-        jin = prev["judgement"]
+        jin = staged_judgement(prev)
     elif prev["kind"] == "legacy":
         plan = derive_plan(prev["judgement"], name)
-        jin = prev["judgement"]
+        jin = staged_judgement(prev)
     else:
         plan = {"schema": C.SCHEMA_PLAN, "generation": name, "origin": "proposed", "phases": []}
         jin = {}
@@ -306,6 +325,14 @@ def cache_save(pm, cache):
 
 
 # ---------------------------------------------------------------- the decision
+def _release_view(repos):
+    """{path: release} of the repos that carry release facts (what the page shows). A state written before 3.3.0 has
+    none, which differs from a fresh collection only after the judgement test has already passed. A shared (sub-folder)
+    repository compares by its key only: a parent-only commit stays invisible to the package."""
+    return {r.get("path"): ({"key": r["release"].get("key")} if r["release"].get("shared") else r["release"])
+            for r in repos or [] if isinstance(r, dict) and isinstance(r.get("release"), dict)}
+
+
 def decide(root, pm, prev, snap):
     """-> (verdict, why). verdict in NEEDS_FULL | NEEDS_JUDGEMENT | NEEDS_REFRESH | NO_CHANGE."""
     if prev["kind"] == "none":
@@ -335,9 +362,15 @@ def decide(root, pm, prev, snap):
         return "NEEDS_REFRESH", "plugin files changed"
     if S.get("stale"):
         return "NEEDS_REFRESH", "stale cleared"
+    if _release_view(S.get("repos")) != _release_view(snap["repos"]):   # behind count, recent tags: display only
+        return "NEEDS_REFRESH", "release facts changed"
     at = C.parse_iso(S["identity"].get("snapshot_at"))
     if at is None or (C.now() - at).total_seconds() >= HOUR:
         return "NEEDS_REFRESH", "map older than 1 h"
+    if cmp["unverified"]:   # the refs kept moving while they were read: unknown, never "current" (script-owned, no paid judgement)
+        return "NO_CHANGE", "nothing moved (tags and branch sync unverified: refs kept moving during the read)"
+    if cmp["incomplete"]:   # never a bare "complete" claim: the tag listing is a lower bound (script-owned warning)
+        return "NO_CHANGE", "nothing moved (tag list incomplete: too many tags at HEAD to verify)"
     return "NO_CHANGE", "nothing moved"
 
 
@@ -376,6 +409,8 @@ def run_facts(root, budget, as_json, stage=True):
         raise err("git_error: %s" % ex)
     except K.PackOverflow:
         raise err("pack over 8 KB")
+    except K.AnswersUnreadable as ex:
+        raise err(str(ex))
     except K.AnswersRewritten:
         me = os.path.join(HERE, "project-map-facts.py")
         raise err("answers rewritten; run: python3 %s --accept-answers %s" % (me, root))
@@ -403,10 +438,14 @@ def run_facts(root, budget, as_json, stage=True):
                     if prev["kind"] != "v4":
                         raise err("map unreadable after refresh")
         if stage:
-            snap["usage"] = K.collect_usage(root, min(60.0, rem)) if can_refresh else None
+            # usage never turns a verdict into an error: out of budget or time keeps the previous numbers (marked stale)
+            pu = prev["state"].get("usage") if prev["kind"] == "v4" and isinstance(prev["state"], dict) else None
+            snap["usage"] = K.collect_usage(root, min(USAGE_CAP, rem), pu) if can_refresh else K.stale_usage(pu)
             inv = make_staging(pm, root, prev, snap)
     cache_save(pm, cache)
     line = "%s %s" % (verdict, why)
+    if (snap.get("answers") or {}).get("tail"):   # script-owned: an unterminated record is not read, so say so
+        line += " (warning: answers.jsonl has an uncommitted last line)"
     if inv:
         line += " inv %s" % inv
     return line, inv, snap

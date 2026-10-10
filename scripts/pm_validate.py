@@ -23,7 +23,54 @@ TONES = ("ok", "watch", "blocked")   # "stale" is set by the script (stale recor
 ACTORS = ("claude", "codex", "owner", "external")
 TOP_KEYS = {"generation", "project", "run", "watch", "repos", "headline", "parts", "current_phase", "criteria_updates",
             "eta", "next_step", "decisions", "loops", "risks", "template_feedback"}
-SCRIPT_OWNED = ("answer", "answered_by", "answered_at", "status", "raised_at", "frozen")
+SCRIPT_OWNED = ("answer", "answered_by", "answered_at", "status", "raised_at", "frozen",
+                "closed_by", "closed_at", "overtaken_why", "overtaken_ref")
+OPEN_ST = ("open", "overdue")
+CLOSED_ST = ("answered", "defaulted", "overtaken")   # a closed decision lives for exactly one generation
+
+
+# ---------------------------------------------------------------- decision tombstones (permanent)
+_DEC_RANGE = re.compile(r"^D-(\d{3})(?:\.\.D-(\d{3}))?$")
+
+
+def decode_decision_ids(text):
+    """'D-000..D-003,D-007' -> {'D-000', ..., 'D-003', 'D-007'}. Tolerant: anything that is not a range or id is skipped."""
+    out = set()
+    for tok in (text.split(",") if isinstance(text, str) else []):
+        m = _DEC_RANGE.match(tok.strip())
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+            out.update("D-%03d" % n for n in range(lo, max(lo, hi) + 1))
+    return out
+
+
+def encode_decision_ids(ids):
+    """The inverse: consecutive numbers collapse into ranges, so the whole D-nnn space stays within a few KB."""
+    nums = sorted({int(i[2:]) for i in ids if isinstance(i, str) and DEC_ID.match(i)})
+    out, k = [], 0
+    while k < len(nums):
+        j = k
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append("D-%03d" % nums[k] if j == k else "D-%03d..D-%03d" % (nums[k], nums[j]))
+        k = j + 1
+    return ",".join(out)
+
+
+def retired_decision_ids(prev):
+    """Every decision id ever retired: the permanent set plus any decision id still in the (windowed) retired_ids list."""
+    if not prev:
+        return set()
+    return decode_decision_ids(prev.get("retired_decisions")) | {i for i in prev.get("retired_ids", []) if isinstance(i, str) and DEC_ID.match(i)}
+
+
+def retire_decisions(S, ids):
+    """Add decision ids to S's permanent tombstones (and, as before, to the windowed retired_ids list)."""
+    ids = [i for i in ids if isinstance(i, str) and DEC_ID.match(i)]
+    S["retired_decisions"] = encode_decision_ids(retired_decision_ids(S) | set(ids))
+    ri = list(S.get("retired_ids", []))
+    ri += [i for i in ids if i not in ri]
+    S["retired_ids"] = ri[-200:]
 
 
 # ---------------------------------------------------------------- tiny checkers
@@ -95,6 +142,21 @@ class V(object):
 
 
 # ---------------------------------------------------------------- refs
+def _confined(root, rest, label):
+    """(problem|None, realpath): rest is a relative path that stays inside ROOT, outside .project-map/ and .git/."""
+    if not rest or rest.startswith("/") or ".." in rest.split("/") or "\0" in rest or "\n" in rest:
+        return "%s %r must be a relative path inside the project" % (label, rest[:60]), None
+    rp = os.path.realpath(os.path.join(root, rest))
+    if not C.under(rp, root):
+        return "%s %s is outside the project" % (label, rest[:60]), None
+    low = [x.casefold() for x in rest.split("/") + os.path.relpath(rp, os.path.realpath(root)).split("/")]
+    if ".project-map" in low:
+        return "%s %s points into .project-map/" % (label, rest[:60]), None
+    if ".git" in low:
+        return "%s %s points into .git/" % (label, rest[:60]), None
+    return None, rp
+
+
 def ref_problem(root, repos, ref):
     """None when ref is evidence that exists now: file:<rel>[:line] under ROOT, or commit:<sha7+> in a known repo."""
     if not isinstance(ref, str):
@@ -106,16 +168,9 @@ def ref_problem(root, repos, ref):
             rest, line = m.group(1), int(m.group(2))
             if line < 1:
                 return "line number must be a positive integer"
-        if not rest or rest.startswith("/") or ".." in rest.split("/") or "\0" in rest or "\n" in rest:
-            return "file ref %r must be a relative path inside the project" % rest[:60]
-        rp = os.path.realpath(os.path.join(root, rest))
-        if not C.under(rp, root):
-            return "file ref %s is outside the project" % rest[:60]
-        low = [x.casefold() for x in rest.split("/") + os.path.relpath(rp, os.path.realpath(root)).split("/")]
-        if ".project-map" in low:
-            return "file ref %s points into .project-map/" % rest[:60]
-        if ".git" in low:
-            return "file ref %s points into .git/" % rest[:60]
+        prob, rp = _confined(root, rest, "file ref")
+        if prob:
+            return prob
         if not os.path.isfile(rp):
             return "file ref %s is not an existing regular file" % rest[:60]
         if line is not None and line > C.line_count(rp):
@@ -137,6 +192,243 @@ def ref_problem(root, repos, ref):
                 return None
         return "commit %s not found in any known repository" % sha
     return "ref must start with file: or commit:"
+
+
+# ---------------------------------------------------------------- closure predicates (resolves_when, section 12)
+PRED_KINDS = {"tag_at_head": (("kind", "repo"), ("name",)), "branch_in_sync": (("kind", "repo"), ()),
+              "commit": (("kind", "repo", "sha"), ()), "file": (("kind", "path"), ("exists",))}
+SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def normalize_resolves_when(rw):
+    """-> (normalized list | None, [problems]). Syntax only: 1-3 predicates, closed key sets, every optional key explicit."""
+    if not isinstance(rw, list) or not 1 <= len(rw) <= 3:
+        return None, ["resolves_when must be a list of 1-3 predicates"]
+    out, errs = [], []
+    for n, p in enumerate(rw, 1):
+        w = "resolves_when[%d]" % n
+        if not isinstance(p, dict) or p.get("kind") not in PRED_KINDS:
+            errs.append("%s kind must be one of %s" % (w, "|".join(PRED_KINDS)))
+            continue
+        req, opt = PRED_KINDS[p["kind"]]
+        unknown = sorted(set(p) - set(req) - set(opt))
+        miss = [k for k in req if k not in p]
+        if unknown or miss:
+            errs.append("%s (%s) %s" % (w, p["kind"], "has unknown keys: " + ", ".join(map(str, unknown)) if unknown
+                                        else "is missing: " + ", ".join(miss)))
+            continue
+        q = {"kind": p["kind"]}
+        for k in ("repo", "path"):
+            if k in p:
+                if not isinstance(p[k], str) or not 1 <= C.blen(p[k]) <= 200:
+                    errs.append("%s %s must be a string of 1..200 bytes" % (w, k))
+                    break
+                q[k] = p[k]
+        else:
+            if p["kind"] == "tag_at_head":
+                nm = p.get("name")
+                if nm is not None and (not isinstance(nm, str) or not 1 <= C.blen(nm) <= 100):
+                    errs.append("%s name must be a tag name (1..100 bytes) or null" % w)
+                    continue
+                q["name"] = nm
+            elif p["kind"] == "commit":
+                if not isinstance(p["sha"], str) or not SHA_RE.match(p["sha"]):
+                    errs.append("%s sha must be 7-40 lowercase hex characters" % w)
+                    continue
+                q["sha"] = p["sha"]
+            elif p["kind"] == "file":
+                ex = p.get("exists", True)
+                if not isinstance(ex, bool):
+                    errs.append("%s exists must be true or false" % w)
+                    continue
+                q["exists"] = ex
+            out.append(q)
+    return (None, errs) if errs else (out, [])
+
+
+def _snap_repo(snap, path):
+    return next((r for r in snap.get("repos", []) if isinstance(r, dict) and r.get("path") == path), None)
+
+
+REPO_GONE = "repo path escaped or changed; refresh facts"
+
+
+def repo_dir(root, r):
+    """The live directory of snapshot repository r, or None when it can no longer be trusted: the recorded path is
+    resolved under ROOT (realpath), must stay inside ROOT's realpath, be a directory, and still be the root of its own git
+    work tree (git's toplevel there is that same directory). A path swapped for a symlink to a repository elsewhere, a
+    vanished directory or a different repository all fail closed."""
+    path = r.get("path") if isinstance(r, dict) else None
+    if not isinstance(path, str):
+        return None
+    prob, rp = _confined(root, path, "repo path")
+    if prob or not os.path.isdir(rp):
+        return None
+    try:
+        top = G.toplevel(rp, timeout=10.0)
+    except Exception:   # noqa: BLE001 - anything that stops the check means "cannot confirm"
+        return None
+    return rp if top and os.path.realpath(top) == rp else None
+
+
+def _tag_ident(snap, repo, name):
+    """Display name of a tag -> (tid | None, problem | None). A tag at HEAD is bound by the identity (hash of its raw ref name)
+    the script recorded for it; a display name that matches more than one head tag ('[redacted]' twice) is ambiguous. A
+    name that is not at HEAD yet (the tag the decision waits for) is bound by the hash of the plain name itself, which is
+    only possible for a name that is its own display form and legal in git (no backslash, no bracket)."""
+    r = _snap_repo(snap, repo) or {}
+    rel = r.get("release") if isinstance(r.get("release"), dict) else {}
+    hits = [t for t in (rel.get("head_tags") or []) if isinstance(t, dict) and t.get("name") == name]
+    if len(hits) > 1:
+        return None, "tag name %s matches %d tags at HEAD of %s; it is ambiguous (several tags display the same)" \
+            % (C.trim(name, 40), len(hits), C.trim(repo, 40))
+    if hits:
+        tid = hits[0].get("tid")
+        return (tid, None) if isinstance(tid, str) and tid else (None, "tag %s has no recorded identity; refresh facts" % C.trim(name, 40))
+    if C.display_safe(name) != name or "\\" in name or "[" in name:
+        return None, "tag name %s is not a tag at HEAD of %s and is not a plain tag name (an escaped or redacted display form " \
+            "cannot name a tag that is not there)" % (C.trim(name, 40), C.trim(repo, 40))
+    why = G.tag_name_problem(name)
+    if why:   # a name git can never create as a tag could never hold: refused when the decision is raised
+        return None, "tag name %s is not a legal git tag name (%s); a future tag must be a name git accepts" % (C.trim(name, 40), why)
+    return C.tag_tid(name), None
+
+
+def _tag_at_head(snap, repo, name):
+    rel = (_snap_repo(snap, repo) or {}).get("release")
+    return any(isinstance(t, dict) and t.get("name") == name for t in ((rel or {}).get("head_tags") or [])) \
+        if isinstance(rel, dict) else False
+
+
+def bind_tids(snap, preds):
+    """Copy of well-formed predicates with the identity of every named tag stored beside its display name."""
+    out = []
+    for p in preds:
+        q = dict(p)
+        if q["kind"] == "tag_at_head" and q.get("name") is not None:
+            q["tid"] = _tag_ident(snap, q["repo"], q["name"])[0]
+        out.append(q)
+    return out
+
+
+def strip_tids(preds):
+    return [{k: v for k, v in p.items() if k != "tid"} for p in preds if isinstance(p, dict)]
+
+
+def predicates_in_snapshot(root, snap, preds):
+    """Raise-time checks of well-formed predicates against the snapshot: the repo exists (and is git, and its path is still
+    confined under ROOT), the path is confined, a named tag is unambiguous."""
+    errs = []
+    for n, p in enumerate(preds, 1):
+        w = "resolves_when[%d]" % n
+        if p["kind"] == "file":
+            prob, _rp = _confined(root, p["path"], "path")
+            if prob:
+                errs.append("%s %s" % (w, prob))
+            continue
+        r = _snap_repo(snap, p["repo"])
+        if r is None:
+            errs.append("%s repo %s is not a repository of this project (see repos[] in the pack)" % (w, C.trim(p["repo"], 60)))
+        elif r.get("vcs") != "git":
+            errs.append("%s repo %s is not a git repository" % (w, C.trim(p["repo"], 60)))
+        elif repo_dir(root, r) is None:
+            errs.append("%s repo %s: %s" % (w, C.trim(p["repo"], 60), REPO_GONE))
+        elif p["kind"] == "tag_at_head" and p.get("name") is not None:
+            tid, prob = _tag_ident(snap, p["repo"], p["name"])
+            if prob:
+                errs.append("%s %s" % (w, prob))
+            elif not _tag_at_head(snap, p["repo"], p["name"]) \
+                    and G.tag_name_git_ok(repo_dir(root, r), p["name"]) is False:   # the real git has the last word when it can speak
+                errs.append("%s tag name %s is not a legal git tag name (git check-ref-format refuses it)"
+                            % (w, C.trim(p["name"], 40)))
+    return errs
+
+
+def _describe(p):
+    k = p["kind"]
+    if k == "tag_at_head":
+        return "tag %s at HEAD of %s" % (p["name"] or "(any)", p["repo"])
+    if k == "branch_in_sync":
+        return "%s in sync with its upstream" % p["repo"]
+    if k == "commit":
+        return "commit %s in %s" % (p["sha"], p["repo"])
+    return "file %s %s" % (p["path"], "exists" if p["exists"] else "is absent")
+
+
+def _eval(root, snap, p):
+    """-> (holds, evidence, why). `why` is set only when the predicate could not be established (unknown), never for a
+    plain "not yet": anything that cannot be established is false."""
+    k = p["kind"]
+    if k == "file":
+        prob, rp = _confined(root, p["path"], "path")
+        if prob:
+            return False, "", "path is not confined to the project"
+        if p["exists"]:
+            return os.path.isfile(rp), "file:" + p["path"], ""
+        # absence of the REQUESTED directory entry: lstat of the confined original path, never of its dereferenced target
+        # (a dangling symlink is an entry that exists)
+        try:
+            os.lstat(os.path.join(root, p["path"]))
+        except (FileNotFoundError, NotADirectoryError):
+            return True, "absent:" + p["path"], ""
+        except OSError as ex:
+            return False, "", "cannot check %s: %s" % (C.trim(p["path"], 40), ex.strerror or type(ex).__name__)
+        return False, "absent:" + p["path"], ""
+    r = _snap_repo(snap, p["repo"])
+    if r is None or r.get("vcs") != "git":
+        return False, "", ""
+    repo = repo_dir(root, r)
+    if repo is None:   # a path swapped for a link elsewhere, removed or turned into another repository: facts are stale
+        return False, "", "%s: %s" % (C.trim(p["repo"], 40), REPO_GONE)
+    rel = r.get("release") if isinstance(r.get("release"), dict) else {}
+    if k == "tag_at_head":
+        tags = [t for t in (rel.get("head_tags") or []) if isinstance(t, dict) and isinstance(t.get("name"), str)]
+        want = p["name"]
+        if want is None:
+            hit = tags[0]["name"] if tags else None
+        else:
+            tid = p.get("tid") or C.tag_tid(want)
+            hit = next((t["name"] for t in tags if t.get("tid") == tid), None)
+        return hit is not None, ("tag:" + (hit or want or "")), ""
+    if k == "branch_in_sync":
+        return (rel.get("sync") or {}).get("state") == "aligned", "sync:aligned", ""
+    sha = p["sha"]
+    ev = "commit:" + sha
+    if len(sha) == 7 and any(i.get("h") == sha and i.get("r") == p["repo"] for d in (snap.get("commits") or {}).get("days", [])
+                             if isinstance(d, dict) for i in d.get("items", []) if isinstance(i, dict)):
+        return True, ev, ""
+    try:
+        rc, out = G.run(repo, "cat-file", "-t", sha, timeout=10.0)
+    except G.GitArgError:
+        return False, ev, ""
+    return (rc == 0 and out.strip() == "commit"), ev, ""
+
+
+def eval_predicate(root, snap, p):
+    """-> (holds, evidence string). Script-evaluated against the staged snapshot (file: against the disk, commit: against
+    git, in the repository's confined live directory); anything that cannot be established is false."""
+    return _eval(root, snap, p)[:2]
+
+
+def evaluate_resolves_when_ex(root, snap, preds):
+    """-> (every predicate holds, [evidence of those that hold], [descriptions of those that do not], [reasons a predicate
+    could not be established])."""
+    ok, ev, unmet, why = True, [], [], []
+    for p in preds:
+        holds, e, w = _eval(root, snap, p)
+        if holds:
+            ev.append(e)
+        else:
+            ok = False
+            unmet.append(_describe(p))
+            if w:
+                why.append(w)
+    return ok, ev, unmet, why
+
+
+def evaluate_resolves_when(root, snap, preds):
+    """-> (every predicate holds, [evidence strings of the predicates that hold], [descriptions of those that do not])."""
+    return evaluate_resolves_when_ex(root, snap, preds)[:3]
 
 
 # ---------------------------------------------------------------- plan
@@ -367,20 +659,21 @@ def _decisions(v, J, ctx):
     if not v.lst(decs, "decisions", 0, 6):
         return
     prev = ctx["prev"]
-    retired = set(prev.get("retired_ids", [])) if prev else set()
+    retired = retired_decision_ids(prev)
     in_prev = {d["id"] for d in (prev or {}).get("decisions", []) if isinstance(d, dict)}
     seen = set()
+    sd = {x["id"]: x for x in ctx["snap"].get("decisions", []) if isinstance(x, dict) and isinstance(x.get("id"), str)}
     for d in decs:
         if isinstance(d, dict):
             for k in SCRIPT_OWNED:
                 if k in d:
                     v.e("decision %s: %s is owned by the script and must not be supplied" % (d.get("id"), k))
         if not v.obj(d, "decision", ("id", "q", "options", "default"),
-                     ("recommended", "hard_rule", "deadline", "ready") + SCRIPT_OWNED):
+                     ("recommended", "hard_rule", "deadline", "ready", "overtaken", "resolves_when") + SCRIPT_OWNED):
             continue
         did = v.ident(d["id"], "decision", DEC_ID, seen)
         if did and did in retired and did not in in_prev:
-            v.e("decision id %s was retired, ids are never reused" % did)
+            v.e("decision id %s was retired, ids are never reused (drop it from decisions[])" % did)
         w = "decision %s" % d.get("id")
         v.s(d["q"], w + " q", 140)
         oids = set()
@@ -401,6 +694,36 @@ def _decisions(v, J, ctx):
             v.e("%s: a hard_rule or ready:false decision must have default 'hold'" % w)
         if d.get("deadline") is not None and C.parse_iso(d["deadline"]) is None:
             v.e("%s: deadline must be an ISO timestamp or null" % w)
+        staged = sd.get(d["id"])
+        if "resolves_when" in d:
+            norm, errs = normalize_resolves_when(d["resolves_when"])
+            if staged is not None:   # a carried decision: its closure predicate was fixed when it was raised
+                if errs or norm != strip_tids(staged.get("resolves_when") or []):
+                    v.e("%s: resolves_when is fixed when the decision is raised; it cannot be added or changed later" % w)
+            else:
+                for m in errs or predicates_in_snapshot(ctx["root"], ctx["snap"], norm):
+                    v.e("%s %s" % (w, m))
+        if "overtaken" in d:
+            ov = d["overtaken"]
+            if v.obj(ov, w + " overtaken", ("why",), ("ref",)) and v.s(ov["why"], w + " overtaken.why", 120):
+                if (staged or {}).get("status") not in OPEN_ST:
+                    v.e("%s: overtaken closes an open or overdue decision only" % w)
+                elif not staged.get("resolves_when"):
+                    v.e("%s: overtaken needs the resolves_when predicate set when the decision was raised; this one has none, "
+                        "so only the owner's answer closes it" % w)
+                else:
+                    ok, ev, unmet, why = evaluate_resolves_when_ex(ctx["root"], ctx["snap"], staged["resolves_when"])
+                    if not ok:
+                        v.e("%s: overtaken, but resolves_when does not hold yet (%s)%s"
+                            % (w, "; ".join(unmet), " [could not be established: %s]" % "; ".join(why) if why else ""))
+                    elif "ref" in ov and ov["ref"] not in ev:
+                        v.e("%s overtaken.ref must be one of the checked evidence strings: %s" % (w, ", ".join(ev)))
+    for i in sorted(sd):   # never-vanish: an open decision is carried or closed by events, never silently dropped
+        if sd[i].get("status") in OPEN_ST and i not in seen:
+            if sd[i].get("resolves_when"):
+                v.e("decision %s is open: carry it, or close it with overtaken{why} once its resolves_when holds" % i)
+            else:
+                v.e("decision %s is open and has no resolves_when: carry it unchanged, only the owner's answer closes it" % i)
 
 
 # ---------------------------------------------------------------- merge
@@ -443,7 +766,8 @@ def diff_changes(prev, S, t):
         if not o:
             add(d["id"], d["id"], "opened", "open")
         elif o.get("status") != d["status"]:
-            add(d["id"], d["id"], "status: %s → %s" % (o.get("status"), d["status"]), d["status"])
+            add(d["id"], d["id"], "overtaken: %s" % d.get("overtaken_why", "") if d["status"] == "overtaken"
+                else "status: %s → %s" % (o.get("status"), d["status"]), d["status"])
         elif o.get("q") != d.get("q") or [x.get("id") for x in o.get("options", [])] != [x.get("id") for x in d.get("options", [])]:
             add(d["id"], d["id"], "question or options changed")
     if prev.get("risks") != S["risks"]:
@@ -451,8 +775,11 @@ def diff_changes(prev, S, t):
     return out[:8]
 
 
-def merge_decisions(J, snap, prev):
-    """Model text for open/overdue decisions, script copy for answered/defaulted ones (6.4 freezing)."""
+def merge_decisions(J, snap, prev, root=None):
+    """Model text for open/overdue decisions, script copy for answered/defaulted ones (6.4 freezing). A decision the model
+    closes with overtaken{why} becomes status "overtaken" (script-owned, one generation, like answered): the record is a
+    verbatim copy of the STAGED decision, the model's text for that id is ignored apart from overtaken.why, and the
+    script re-evaluates the frozen resolves_when (the evidence it holds becomes overtaken_ref)."""
     sd = {d["id"]: d for d in snap["decisions"]}
     pd = {d["id"]: d for d in (prev or {}).get("decisions", [])}
     t = snap["facts_at"]
@@ -461,17 +788,30 @@ def merge_decisions(J, snap, prev):
         i = m["id"]
         seen.add(i)
         s = sd.get(i)
-        if s is None and (pd.get(i) or {}).get("status") in ("answered", "defaulted", "withdrawn"):
+        if s is None and (pd.get(i) or {}).get("status") in CLOSED_ST:
             continue   # a closed decision lives for one run: the model still carrying it does not keep it
         if s is not None and s["status"] in ("answered", "defaulted"):
             out.append(copy.deepcopy(s))
             continue
+        if s is not None and s["status"] in OPEN_ST and isinstance(m.get("overtaken"), dict) and s.get("resolves_when"):
+            ok, ev, _unmet = evaluate_resolves_when(root or snap["root"], snap, s["resolves_when"])
+            if ok:
+                d = copy.deepcopy(s)
+                d.update(status="overtaken", closed_by="events", closed_at=t, overtaken_why=m["overtaken"]["why"],
+                         overtaken_ref=" + ".join(ev))
+                d.setdefault("raised_at", t)
+                out.append(d)
+                continue
         d = {"recommended": None, "hard_rule": None, "deadline": None, "ready": True}
         d.update({k: copy.deepcopy(m[k]) for k in ("id", "q", "options", "recommended", "default", "hard_rule", "deadline", "ready") if k in m})
         if d["deadline"] is not None:
             d["deadline"] = C.iso(C.parse_iso(d["deadline"]))
         if s is not None and s["status"] == "overdue" and (s.get("hard_rule") or s.get("ready") is False):
             d["hard_rule"], d["default"], d["ready"] = s.get("hard_rule"), "hold", s.get("ready", True)
+        rw = s.get("resolves_when") if s is not None else \
+            (bind_tids(snap, normalize_resolves_when(m["resolves_when"])[0] or []) if "resolves_when" in m else None)
+        if rw:
+            d["resolves_when"] = copy.deepcopy(rw)
         d["status"] = s["status"] if s is not None else "open"
         d["raised_at"] = (s or pd.get(i) or {}).get("raised_at") or t
         out.append(d)
@@ -490,7 +830,7 @@ def build_state(ctx):
     t = snap["facts_at"]
     phases, cur, blocking = derive_phases(ctx["plan"], J["current_phase"])
     curp = next(p for p in phases if p["id"] == cur)
-    decs = merge_decisions(J, snap, prev)
+    decs = merge_decisions(J, snap, prev, root)
     open_ids = [d["id"] for d in decs if d["status"] == "overdue"]
     key = copy.deepcopy(snap["key"])
     key["expired_ids"] = sorted(open_ids)
@@ -515,12 +855,13 @@ def build_state(ctx):
         "answers": {"total": snap["answers"]["total"], "applied": snap["answers"]["total"],
                     "applied_hash": snap["answers"]["total_hash"], "bad": [b["line"] for b in snap["answers"]["bad"]][:5]},
         "watch": list(J.get("watch", [])), "watch_dropped": snap.get("watch_dropped", []),
-        "repos": [{k: r.get(k) for k in ("path", "vcs", "branch", "head", "head_at")} for r in snap["repos"]],
+        "repos": [dict({k: r.get(k) for k in ("path", "vcs", "branch", "head", "head_at")},
+                       **({"release": r["release"]} if isinstance(r.get("release"), dict) else {})) for r in snap["repos"]],
         "commits": snap["commits"], "status": {k: snap["status"][k] for k in ("dirty", "hash")},
         "ledger": ({k: snap["ledger"][k] for k in ("path", "name", "goal", "now", "next", "blockers")} if snap.get("ledger") else None),
         "run": {"n": ctx["n"], "type": J["run"]["type"], "model": J["run"]["model"], "at": t},
         "template_feedback": J.get("template_feedback", []), "kept": ctx.get("kept", []),
-        "retired_ids": [],
+        "retired_ids": [], "retired_decisions": "",
     }
     S["changes"] = diff_changes(prev, S, t) if prev else []
     old_ids = [x["id"] for k in ("parts", "decisions") for x in (prev or {}).get(k, [])]
@@ -530,13 +871,20 @@ def build_state(ctx):
         if i not in new_ids and i not in retired:
             retired.append(i)
     S["retired_ids"] = retired[-200:]
+    # decision ids are retired for good: the 200-id window above is for parts; the tombstones are a compact range set
+    gone = [d["id"] for d in (prev or {}).get("decisions", []) if isinstance(d, dict) and d.get("id") not in new_ids]
+    S["retired_decisions"] = encode_decision_ids(retired_decision_ids(prev) | set(gone))
     u = (snap.get("usage") or {}).get("totals") or {}
     opened = [d["id"] for d in decs if d["id"] not in {x["id"] for x in (prev or {}).get("decisions", [])} and d["status"] == "open"]
-    closed = [d["id"] for d in decs if d["status"] in ("answered", "defaulted")]
+    closed = [d["id"] for d in decs if d["status"] in CLOSED_ST]
+    hchanged = [{k: c[k] for k in ("id", "label", "text")} for c in S["changes"]]
+    for d in decs:   # the history keeps the closing even when the changes list was cut or reset (legacy base)
+        if d["status"] == "overtaken" and not any(c["id"] == d["id"] for c in hchanged):
+            hchanged.append({"id": d["id"], "label": d["id"], "text": "overtaken: %s" % d.get("overtaken_why", "")})
     S["history"].append({"run": ctx["n"], "at": t, "generation": ctx["genstr"],
                          "counts": {k: sum(1 for p in parts if p["status"] == k) for k in PART_ST},
                          "phase": {"current": cur, "done": curp["done"], "total": curp["total"]},
-                         "changed": [{k: c[k] for k in ("id", "label", "text")} for c in S["changes"]],
+                         "changed": hchanged,
                          "decisions_opened": opened, "decisions_closed": closed,
                          "usage": {"claude": u.get("claude"), "codex": u.get("codex"), "all": u.get("all")}})
     S["history"] = S["history"][-10:]

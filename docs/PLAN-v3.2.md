@@ -142,6 +142,7 @@ D6. eta.low/high validated; `Z` and fractional seconds normalised; years out of 
     cleanly; `glob.escape(root)`; ROOT must be an existing directory before any makedirs.
 D7. facts.json rewritten only when the key changed (a second facts run no longer forces a
     re-judge); usage scan only when judging or when the map is > 1 h old.
+    (3.3.0: the age is the usage's own as-of time and a slow scan never fails the refresh; see INTERFACES-3.2 section 11.)
 D8. Validation: whitelist nested keys, strip model-supplied answer fields, `commit:` must resolve
     to a hex SHA in the repo, `file:` must not point inside `.project-map/`.
 D9. Maintainability: one atomic-write helper, `__pycache__` written to `${CLAUDE_PLUGIN_DATA}`

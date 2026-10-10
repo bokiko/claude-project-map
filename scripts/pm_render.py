@@ -71,6 +71,8 @@ def brief(S):
     for d in need:
         by = ", by %s" % d["deadline"][:10] if d.get("deadline") else ""
         dl.append("%s needs you: %s (default %s%s)" % (d["id"], d["q"], d["default"], by))
+    ov_lines = ["%s overtaken by events: %s (%s)" % (d["id"], C.trim(d.get("overtaken_why", ""), 120), C.trim(d.get("overtaken_ref", ""), 80))
+                for d in S["decisions"] if d["status"] == "overtaken"]   # information for one generation, never "needs you"
     tail = []
     ns = S["next_step"]
     tail.append("next: %s (%s)" % (ns["title"], ns["actor"]))
@@ -81,13 +83,21 @@ def brief(S):
         tail.append("coverage partial %d/%d" % (cv.get("covered", 0), cv.get("total", 0)))
     tot = ((S.get("usage") or {}).get("totals") or {})
     if tot.get("all") is not None:
-        tail.append("tokens %s (claude %s, codex %s)" % (human(tot.get("all")), human(tot.get("claude")), human(tot.get("codex"))))
+        uline = "tokens %s (claude %s, codex %s)" % (human(tot.get("all")), human(tot.get("claude")), human(tot.get("codex")))
+        if (S.get("usage") or {}).get("stale"):   # the last scan could not finish in time: say which run the numbers are from
+            uline += " · usage as of %s" % (str((S["usage"]).get("at") or "")[:16].replace("T", " ") or "an earlier run")
+        tail.append(uline)
 
+    rl = ""
+    r0 = next((r for r in S.get("repos") or [] if isinstance(r, dict)), None)
+    if r0 and isinstance(r0.get("release"), dict) and r0["release"].get("line"):
+        rl = "git: " + C.trim(r0["release"]["line"], 200)   # local evidence only; see release_line in pm_collect
     out, used = [], C.blen(trailer) + 1
     for ln in lines:
         if used + C.blen(ln) + 1 <= BRIEF_MAX:
             out.append(ln)
             used += C.blen(ln) + 1
+    rel_at = len(out)
     shown = 0
     for i, ln in enumerate(dl):
         left_after = len(dl) - i - 1
@@ -102,9 +112,30 @@ def brief(S):
         more = "+%d more decisions" % (len(dl) - shown)
         out.append(more)
         used += C.blen(more) + 1
-    for ln in tail:
+    dec_end = len(out)
+
+    def place_extras():
+        # overtaken lines sit with the decisions block, ranking just below the next step; then the release line
+        nonlocal used, dec_end, rl
+        for ln in ov_lines:
+            if used + C.blen(ln) + 1 <= BRIEF_MAX:
+                out.insert(dec_end, ln)
+                dec_end += 1
+                used += C.blen(ln) + 1
+        if rl and used + C.blen(rl) + 1 <= BRIEF_MAX:
+            out.insert(rel_at, rl)
+            dec_end += 1
+            used += C.blen(rl) + 1
+            rl = ""
+
+    # the release line ranks below the decisions and the next step, above stale/coverage/tokens
+    for i, ln in enumerate(tail):
+        if i == 1:
+            place_extras()
         if used + C.blen(ln) + 1 <= BRIEF_MAX:
             out.append(ln)
             used += C.blen(ln) + 1
+    if len(tail) == 1:
+        place_extras()
     out.append(trailer)
     return "\n".join(out) + "\n"

@@ -7,7 +7,10 @@ diff, ssh command are all overridden on the command line), every GIT_* variable
 of the caller is dropped, and only an allowlisted subcommand/flag grammar is
 accepted. Stdlib only, Python 3.9+.
 
-Public API: run, collection_failure, toplevel, env_for_git, argv_prefix, GitArgError.
+Release-fact tuples (3.3.0): for-each-ref, symbolic-ref and a few extra rev-parse/rev-list forms are accepted as
+exact tuples only (see _v_for_each_ref and friends); they are script-internal and never reachable from pm-git.sh.
+
+Public API: tag_name_problem, tag_name_git_ok, run, stream_lines, collection_failure, toplevel, env_for_git, argv_prefix, GitArgError.
 CLI (used by pm-git.sh only): pm_git.py --agent ROOT <sub> [args]
 """
 from __future__ import annotations
@@ -17,7 +20,7 @@ import re
 import subprocess
 import sys
 
-__all__ = ["GitArgError", "run", "collection_failure", "toplevel", "env_for_git", "argv_prefix"]
+__all__ = ["tag_name_problem", "tag_name_git_ok", "GitArgError", "run", "stream_lines", "collection_failure", "toplevel", "env_for_git", "argv_prefix"]
 
 # -c overrides, in order (section 7.1). They beat repo-local config.
 SAFE_CONFIG = (
@@ -94,14 +97,67 @@ def _v_log(a):
 def _v_ls_files(a):
     _tail_paths(a, 2 if a[:2] == ("-s", "-z") else 0)
 
+REL_HEX40 = r"[0-9a-f]{40}"   # full SHA-1 object ids only; SHA-256 repositories are reported as unknown
+TAG_FMT = "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)"
+UP_FMT = "--format=%(refname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)"
+_REF_BAD = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//")
+
+
+REF_TYPE_FMT = "--format=%(refname)%00%(objecttype)%00%(objectname)"
+
+
+def _lit_ref_ok(r, prefixes):
+    """A literal ref under one of prefixes: git ref grammar, no wildcard or control characters, no option-like forms."""
+    if not _is_str(r) or len(r) > 255 or not any(r.startswith(p) and len(r) > len(p) for p in prefixes):
+        return False
+    if _REF_BAD.search(r) or r.endswith(("/", ".", ".lock")):
+        return False
+    return all(c and not c.startswith(".") and not c.endswith(".lock") for c in r.split("/"))
+
+
+def branch_ref_ok(r):
+    """A literal refs/heads/<branch>."""
+    return _lit_ref_ok(r, ("refs/heads/",))
+
+
+def upstream_ref_ok(r):
+    """The literal ref a branch's upstream config resolves to: refs/remotes/... or refs/heads/..."""
+    return _lit_ref_ok(r, ("refs/remotes/", "refs/heads/"))
+
+
 def _v_rev_parse(a):
-    if a in (("--show-toplevel",), ("--abbrev-ref", "HEAD"), ("HEAD",)):
+    if a in (("--show-toplevel",), ("--abbrev-ref", "HEAD"), ("HEAD",), ("--is-shallow-repository",),
+             ("--verify", "--end-of-options", "HEAD^{commit}")):
         return
+    if len(a) == 3 and a[:2] == ("--verify", "--end-of-options") and a[2].endswith("^{commit}") \
+            and upstream_ref_ok(a[2][:-len("^{commit}")]):
+        return   # the literal configured upstream ref, never an arbitrary revision
     if len(a) != 1 or not re.fullmatch(r"(?:%s)\^\{commit\}" % SHA_RE, a[0]):
         _bad("rev-parse: not allowed")
 
 
+def _v_symbolic_ref(a):
+    if a != ("--quiet", "HEAD"):
+        _bad("symbolic-ref: only --quiet HEAD")
+
+
+def _v_for_each_ref(a):
+    if len(a) == 4 and a[0] == "--sort=refname" and a[1] == TAG_FMT and a[3] == "refs/tags" \
+            and re.fullmatch(r"--points-at=%s" % REL_HEX40, a[2]):
+        return
+    if a == ("--sort=refname", "--sort=-creatordate", "--count=5", TAG_FMT, "refs/tags"):
+        return
+    if len(a) == 2 and a[0] == UP_FMT and branch_ref_ok(a[1]):
+        return
+    if len(a) == 2 and a[0] == REF_TYPE_FMT and upstream_ref_ok(a[1]):   # existence + type of ONE literal ref
+        return
+    _bad("for-each-ref: not allowed")
+
+
 def _v_rev_list(a):
+    if len(a) == 3 and a[:2] == ("--left-right", "--count") \
+            and re.fullmatch(r"%s\.\.\.%s" % (REL_HEX40, REL_HEX40), a[2]):
+        return
     if len(a) != 2 or a[0] != "--count" or not _is_str(a[1]):
         _bad("rev-list: only --count A..B")
     parts = a[1].split("..")
@@ -129,6 +185,55 @@ def _v_diff(a):
     _tail_paths(a, 5)
 
 
+TAG_REF_PREFIX = "refs/tags/"
+
+
+def _v_check_ref_format(a):
+    """Exactly `check-ref-format refs/tags/<name>` (script-internal: raise-time legality of a future tag name). The fixed
+    prefix means the argument can never be an option; the name is bounded and carries no NUL."""
+    if len(a) != 1 or not _is_str(a[0]) or not a[0].startswith(TAG_REF_PREFIX) or not 1 <= len(a[0]) - len(TAG_REF_PREFIX) <= 200:
+        _bad("check-ref-format: only refs/tags/<name>")
+
+
+_TAG_BAD_CHARS = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
+
+
+def tag_name_problem(name):
+    """None when `name` is a legal single tag name, else a short reason. The rules of `git check-ref-format
+    refs/tags/<name>` (no component starting with '.' or ending in '.lock', no '..', no control character, space or one of
+    ~ ^ : ? * [ \\, no '@{', no trailing '.' or '/', no '//'), plus the lone '@' that git refuses as a refname."""
+    if not isinstance(name, str) or not name:
+        return "empty"
+    if name == "@":
+        return "a lone @"
+    if _TAG_BAD_CHARS.search(name):
+        return "a space, control character or one of ~ ^ : ? * [ \\"
+    if ".." in name:
+        return "contains .."
+    if "@{" in name:
+        return "contains @{"
+    if name.endswith("."):
+        return "ends with ."
+    if name.startswith("/") or name.endswith("/") or "//" in name:
+        return "empty path component"
+    for c in name.split("/"):
+        if c.startswith("."):
+            return "a component starts with ."
+        if c.endswith(".lock"):
+            return "a component ends with .lock"
+    return None
+
+
+def tag_name_git_ok(repo, name):
+    """True/False from the real `git check-ref-format refs/tags/<name>` run in repo; None when git cannot say (missing,
+    timeout, repo unusable)."""
+    try:
+        rc, _out = run(repo, "check-ref-format", TAG_REF_PREFIX + name, timeout=10.0)
+    except GitArgError:
+        return False
+    return True if rc == 0 else False if rc == 1 else None
+
+
 def _v_branch(a):
     if a not in (("--show-current",), ("--list",)):
         _bad("branch: not allowed")
@@ -137,10 +242,13 @@ def _v_branch(a):
 VALIDATORS = {
     "status": _v_status, "log": _v_log, "ls-files": _v_ls_files, "rev-parse": _v_rev_parse,
     "rev-list": _v_rev_list, "merge-base": _v_merge_base, "cat-file": _v_cat_file,
-    "diff": _v_diff, "branch": _v_branch, "tag": lambda a: a == ("--list",) or _bad("tag: only --list"),
+    "diff": _v_diff, "branch": _v_branch, "symbolic-ref": _v_symbolic_ref, "for-each-ref": _v_for_each_ref,
+    "check-ref-format": _v_check_ref_format, "tag": lambda a: a == ("--list",) or _bad("tag: only --list"),
 }
 # Subcommands where a specific non-zero rc is the documented answer, not a failure.
 ANSWER_RC = {"cat-file": 1, "merge-base": 1}
+# symbolic-ref --quiet HEAD, rc 1 = detached HEAD: the release collector reads that rc itself (run() returns it);
+# it is deliberately NOT an ANSWER_RC entry, so nothing else can mistake a failure for it.
 
 
 def env_for_git():
@@ -244,3 +352,53 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+
+
+
+def stream_lines(repo, sub, *args, timeout=20.0, max_rows=None, on_row=None):
+    """Validated git call whose stdout is consumed line by line through on_row(line) without being held in memory.
+    Stops (and kills git) after max_rows rows. -> (rc, truncated): rc 124 on timeout, 127 when git is missing; a
+    truncated read reports rc 0 and truncated True."""
+    import threading
+    check = VALIDATORS.get(sub) if isinstance(sub, str) else None
+    if check is None:
+        _bad("subcommand not allowed: %r" % (sub,))
+    if not all(isinstance(x, str) for x in args):
+        _bad("arguments must be strings")
+    check(tuple(args))
+    argv = argv_prefix(repo) + [sub] + list(args)
+    try:
+        p = subprocess.Popen(argv, env=env_for_git(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL)
+    except OSError:
+        return 127, False
+    timed = {"out": False}
+
+    def kill():
+        timed["out"] = True
+        try:
+            p.kill()
+        except OSError:
+            pass
+    timer = threading.Timer(timeout, kill)
+    timer.start()
+    n, trunc = 0, False
+    try:
+        for raw in p.stdout:
+            n += 1
+            if max_rows is not None and n > max_rows:
+                trunc = True
+                p.kill()
+                break
+            if on_row:
+                on_row(raw.decode("utf-8", errors="replace").rstrip("\n"))
+    finally:
+        timer.cancel()
+        try:
+            p.stdout.close()
+        except OSError:
+            pass
+        p.wait()
+    if timed["out"]:
+        return 124, False
+    return (0 if trunc else p.returncode), trunc

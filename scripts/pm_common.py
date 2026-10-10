@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import stat as _stat
 import time
 
 SCHEMA_STATE = "project-map-4"
@@ -362,9 +363,9 @@ _KEY = {"fresh": False}
 
 
 def key_path():
-    d = os.environ.get("CLAUDE_PLUGIN_DATA")
-    if d:
-        return os.path.join(d, "key")
+    # ONE location for every caller. Hooks run with CLAUDE_PLUGIN_DATA set, but the skill's own Bash calls (facts,
+    # embed) do not get it; a key chosen by that variable made hooks reject every map the skill published (3.3.0 fix).
+    # The guard denies the map agent any read of this file.
     return os.path.join(os.path.expanduser("~"), ".claude", "agent-memory", "project-map", "key")
 
 
@@ -397,6 +398,35 @@ def key_was_created():
     return _KEY["fresh"]
 
 
+def usage_private_dir():
+    """The plugin's private usage-scan directory (cache and last result, mode 0700). The guard denies the map agent any read of it."""
+    return os.path.join(os.path.dirname(key_path()), "usage")
+
+
+_LEGACY_USAGE = ("usage-cache.json", "usage-last.json")
+
+
+def sweep_legacy_usage(pm):
+    """One-time migration (3.3.0): the usage scan used to keep its cache and last result inside ROOT/.project-map, where the
+    map agent can read them. Delete those files (and their temp files) if present; never follows a symlinked folder.
+    -> number of files removed."""
+    try:
+        if not _stat.S_ISDIR(os.lstat(pm).st_mode):
+            return 0
+        names = os.listdir(pm)
+    except OSError:
+        return 0
+    n = 0
+    for name in names:
+        if name in _LEGACY_USAGE or name.startswith(tuple("." + x + ".tmp." for x in _LEGACY_USAGE)):
+            try:
+                os.unlink(os.path.join(pm, name))
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
 def published_dir():
     return os.path.join(os.path.dirname(key_path()), "published")
 
@@ -419,6 +449,9 @@ def adoptable(root, genstr, gdir):
     """A generation whose signature cannot be checked (key lost) may be re-signed ONLY when this machine's own record
     names it and the manifest is byte-identical to what was published, with every listed file intact."""
     rec = load_json(record_path(root))
+    ld = legacy_data_dir()
+    if rec is None and ld:   # the pre-3.3.0 record lived next to the per-DATA key
+        rec = load_json(os.path.join(ld, "published", sha256_bytes(os.path.realpath(root).encode("utf-8", "replace"))))
     if not (isinstance(rec, dict) and rec.get("generation") == genstr and rec.get("root") == os.path.realpath(root)):
         return False
     m = read_manifest(gdir)
@@ -439,18 +472,12 @@ def sign_manifest(files, generation, base):
                     hashlib.sha256).hexdigest()
 
 
-def verify_generation(gdir):
-    """True only when the manifest is signed by this user's key and every listed file matches its size and sha256."""
-    m = read_manifest(gdir)
-    if not m or not isinstance(m.get("hmac"), str):
-        return False
-    k = get_key(create=False)
-    if not k:
-        return False
-    want = hmac.new(k, canon({"files": m["files"], "generation": m.get("generation"), "base": m.get("base")}).encode("utf-8", "replace"),
+def _manifest_hmac(k, m):
+    return hmac.new(k, canon({"files": m["files"], "generation": m.get("generation"), "base": m.get("base")}).encode("utf-8", "replace"),
                     hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(want, m["hmac"]):
-        return False
+
+
+def _files_intact(gdir, m):
     for name, meta in m["files"].items():
         try:
             p = os.path.join(gdir, name)
@@ -459,6 +486,78 @@ def verify_generation(gdir):
         except (OSError, AttributeError):
             return False
     return True
+
+
+def legacy_data_dir():
+    """Before 3.3.0 the key lived in $CLAUDE_PLUGIN_DATA/key (hooks only). -> that directory when it is set, differs
+    from the canonical key's directory and holds a key file; else None."""
+    d = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if not d or not os.path.isabs(d):
+        return None
+    if os.path.realpath(d) == os.path.realpath(os.path.dirname(key_path())):
+        return None
+    kp = os.path.join(d, "key")
+    return d if os.path.isfile(kp) and not os.path.islink(kp) else None
+
+
+def _legacy_recover(gdir, m):
+    """A generation signed by the pre-3.3.0 per-DATA key (CLAUDE_PLUGIN_DATA/key) is re-signed with the canonical key,
+    but ONLY when that legacy key authenticates its manifest and every listed file is intact. Never adopts an unsigned
+    or foreign map, never replaces an existing canonical key (get_key only creates when none exists)."""
+    d = legacy_data_dir()
+    if not d:
+        return False
+    try:
+        with open(os.path.join(d, "key"), "rb") as fh:
+            lk = fh.read()
+    except OSError:
+        return False
+    if len(lk) < 16 or not hmac.compare_digest(_manifest_hmac(lk, m), m["hmac"]) or not _files_intact(gdir, m):
+        return False
+    try:
+        m2 = dict(m, hmac=_manifest_hmac(get_key(), m))
+        atomic_write(os.path.join(gdir, "manifest.json"), dumps(m2, indent=1))
+    except OSError:
+        return False
+    _record_after_resign(gdir, m.get("generation"))
+    return True
+
+
+def _record_after_resign(gdir, manifest_gen):
+    """The manifest changed bytes, so the publish record that names its sha256 must follow: write the canonical record of
+    the OWNING root (<root>/.project-map/gen-<id>) with the final manifest hash, so a later loss of the canonical key
+    can still adopt this generation. Only reached after the legacy key authenticated the manifest (never for an
+    unauthenticated map). A record that names a DIFFERENT generation (a newer publish) is left alone."""
+    try:
+        g = os.path.realpath(gdir)
+        pm = os.path.dirname(g)
+        name = os.path.basename(g)
+        if os.path.basename(pm) != ".project-map" or not name.startswith("gen-") or not GEN_RE.match(name):
+            return
+        genstr = name[4:]
+        if manifest_gen != genstr:
+            return
+        root = os.path.dirname(pm)
+        rec = load_json(record_path(root))
+        if isinstance(rec, dict) and rec.get("generation") not in (None, genstr):
+            return
+        write_publish_record(root, genstr, g)
+    except (OSError, ValueError):
+        pass
+
+
+def verify_generation(gdir):
+    """True only when the manifest is signed by this user's key and every listed file matches its size and sha256.
+    A generation signed by the legacy per-DATA key (see _legacy_recover) is re-signed once and then verifies."""
+    m = read_manifest(gdir)
+    if not m or not isinstance(m.get("hmac"), str) or not isinstance(m.get("files"), dict):
+        return False
+    k = get_key(create=False)
+    if k and hmac.compare_digest(_manifest_hmac(k, m), m["hmac"]):
+        return _files_intact(gdir, m)
+    if _legacy_recover(gdir, m):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------- secret / unsafe text and paths
@@ -505,6 +604,35 @@ def unsafe_strings(obj, label):
         elif SECRET_RE.search(s):
             out.append("%s looks like it contains a secret; remove it" % where)
     return out
+
+
+_ESC_RE = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
+
+
+def display_safe(s, n=None):
+    """Safe display form of a name taken from git (tag, branch, upstream): control, bidi, zero-width and line-separator
+    characters become visible \\uXXXX escapes, a secret-looking value becomes '[redacted]'. Ordinary Unicode and a
+    literal % stay. Only for output: keep the raw name for any internal comparison or key (see ref_ident)."""
+    s = str(s)
+    if SECRET_RE.search(s):
+        s = "[redacted]"
+    s = _ESC_RE.sub(lambda m: "\\u%04x" % ord(m.group(0)), s)
+    return trim(s, n) if n else s
+
+
+def ref_ident(raw):
+    """Key form of a raw name: the name itself when it is safe to show, else its display form + '#' + a hash of the
+    raw bytes (two different hostile names never collide, and nothing hostile reaches state or pages)."""
+    d = display_safe(raw)
+    if d == raw:
+        return raw
+    return "%s#%s" % (d, sha256_bytes(str(raw).encode("utf-8", "surrogatepass"))[:8])
+
+
+def tag_tid(raw):
+    """Stable identity of a RAW tag name (16 hex chars of its sha256): the display form can collide ('[redacted]') or differ
+    from the real name (escapes), the identity cannot."""
+    return sha256_bytes(str(raw).encode("utf-8", "surrogatepass"))[:16]
 
 
 def watch_problem(w):

@@ -11,10 +11,10 @@
 
 <!-- TECH BADGES: flat-square style, unified color 2ecc71 -->
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.2.3-2ecc71?style=flat-square" alt="Version 3.2.3">
+  <img src="https://img.shields.io/badge/Version-3.3.0-2ecc71?style=flat-square" alt="Version 3.3.0">
   <img src="https://img.shields.io/badge/Python-3.9%2B-2ecc71?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Bash-3.2%2B-2ecc71?style=flat-square&logo=gnubash&logoColor=white" alt="Bash">
-  <img src="https://img.shields.io/badge/Tests-1993%20passing-2ecc71?style=flat-square" alt="1993 tests passing">
+  <img src="https://img.shields.io/badge/Tests-2944%20passing-2ecc71?style=flat-square" alt="2944 tests passing">
   <img src="https://img.shields.io/badge/License-MIT-2ecc71?style=flat-square" alt="License MIT">
 </p>
 
@@ -93,6 +93,8 @@ After an update, run `/reload-plugins` or start a new session. The map of a mapp
 
 To answer a decision, open “View the choices” or “Preview the choices,” then reply in Claude Code chat with the option letter, such as `A`. If several decisions are open, include the decision number: `D-004=A`. The page itself does not submit answers.
 
+If you already did what a decision asked about (for example you tagged and pushed by hand), the next refresh closes it as “Resolved by events” for one run, with the evidence it relied on, instead of asking you again; the map only does this when the facts it set down when it raised the question (for example “tag v1.0.0 at HEAD and the branch in sync”) are all true, an answer you give always wins over it, and it never decides for you.
+
 Hard-rule decisions always wait for you. These include deleting things, publishing to someone else's project, pushing changes, spending money, or changing infrastructure. Answering the map records your choice; Claude still needs your explicit approval for the action itself.
 
 ## Everyday use
@@ -113,7 +115,7 @@ See the [FAQ](docs/FAQ.md) for safety, costs, updates, and uninstalling.
 
 ## For developers
 
-Current plugin version: **3.2.3**. Projects without Git history are supported; they use documents and file modification times.
+Current plugin version: **3.3.0**. Projects without Git history are supported; they use documents and file modification times.
 
 ### Local installation
 
@@ -147,7 +149,7 @@ After installing or updating, run `/reload-plugins` or start a new session to lo
 | `REFRESH_FAILED` | The re-render failed; the previous map stays current. | 0 tokens |
 | `ERROR` | Git failure, unsupported location, missing prerequisite. | 0 tokens |
 
-Outputs in `<ROOT>/.project-map/`: an immutable `gen-<seq>-<id>/` per published generation (state, `index.html`, `mobile.html`, `brief.txt`, snapshot, pack, plan, judgement), one `current` symlink switched atomically, and the stable symlinks `index.html`, `mobile.html`, `brief.txt` and `state.json` into it. Also `answers.jsonl` (your answers) and `cache.json`. The folder is added to the project's `.gitignore`.
+Outputs in `<ROOT>/.project-map/`: an immutable `gen-<seq>-<id>/` per published generation (state, `index.html`, `mobile.html`, `brief.txt`, snapshot, pack, plan, judgement), one `current` symlink switched atomically, and the stable symlinks `index.html`, `mobile.html`, `brief.txt` and `state.json` into it. Also `answers.jsonl` (your answers), and `cache.json`. The folder is added to the project's `.gitignore`.
 
 ### How it works
 
@@ -182,18 +184,19 @@ Plugin agents cannot declare hooks in frontmatter. The plugin registers `scripts
 - **Write/Edit:** only the invocation's `judgement.out.json` (FULL also `plan.out.json`), the agent's memory notes, and a one-line `.project-map/` append to the root `.gitignore`. Existing targets must be regular, unlinked files.
 - **Fail closed, with one documented exception.** The guard parses its whole input linearly and the main session is never denied for size; for the map agent an input over 8 MB is denied before any other check, and an input whose mode cannot be established is denied. Claude Code treats a PreToolUse command hook that times out as non-blocking (documented fail-open), so the guard is linear-time (one pass, no per-character loops) and a 40 KB padded command is denied in under a second; the 30 s hook timeout is never meant to be reached.
 
-Every deny is logged to `~/.claude/agent-memory/project-map/guard.log`. These checks govern the map agent, not the whole Claude Code session or the trusted scripts, which hash watched files and read local session records to count usage. The generated page makes no network requests and renders data with `textContent`.
+Every deny is logged to `~/.claude/agent-memory/project-map/guard.log`. These checks govern the map agent, not the whole Claude Code session or the trusted scripts, which hash watched files and read local session records to count usage. The generated page makes no network requests and renders data with `textContent`. The usage scan's cache (which holds transcript paths, so a refresh reads only what grew) is private to the plugin (`~/.claude/agent-memory/project-map/usage/`, denied to the map agent), and only token counters and generic job labels (an ai-title only for a session run in the project folder itself) ever reach the project folder, the page or the brief.
 
 ### Tests
 
 ```bash
-bash tests/test_guard.sh    # 1030 cases: guard modes, binding, background launches, grammar, secret paths
-bash tests/test_embed.sh    # 615 cases: facts + embed, generations, locks, migration
-bash tests/test_git.sh      # 219 cases: pm_git core and the pm-git.sh agent wrapper
+bash tests/test_guard.sh    # 1053 cases: guard modes, binding, background launches, grammar, secret paths
+bash tests/test_embed.sh    # 1131 cases: facts + embed, generations, locks, migration, usage never failing a refresh, decisions overtaken by events
+bash tests/test_git.sh      # 416 cases: pm_git core and the pm-git.sh agent wrapper
 bash tests/test_hooks.sh    # 129 cases: SessionStart, UserPromptSubmit, SubagentStart/Stop hooks, preflight sentences
+bash tests/test_usage.sh    # 215 cases: incremental usage scan equals a full rescan, cache reuse, private counters-only output, budget and resume
 ```
 
-Run all four under both `bash` and `/bin/bash` (3.2) after any change. `HOOKS_DIR=<dir>` points the suites at a scratch copy of `scripts/`.
+Run all five under both `bash` and `/bin/bash` (3.2) after any change. `HOOKS_DIR=<dir>` points the suites at a scratch copy of `scripts/`.
 
 ### Layout
 

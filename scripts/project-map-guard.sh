@@ -406,8 +406,19 @@ chk_path() {
   CP="$RP"
   secret_path "$ab" "$CP" && deny "secret-looking path: $a"
   case "$CP" in /dev|/dev/*) deny "device path: $a";; esac
-  if [ -n "$RDATA" ]; then case "$CP" in "$RDATA"|"$RDATA"/*) deny "plugin data is not readable by the map agent";; esac; fi
-  [ "$CP" != "$MEMR/key" ] || deny "the signing key is not readable by the map agent"
+  # private plugin files: compared on lowercased resolved paths, because a case-insensitive volume (macOS default)
+  # serves ~/.claude/agent-memory/project-map/Usage/... as the same file while the resolved spelling keeps the caller's case
+  LCP=$(printf '%s' "$CP" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  if [ -n "$RDATA" ]; then
+    LRD=$(printf '%s' "$RDATA" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    case "$LCP" in "$LRD"|"$LRD"/*) deny "plugin data is not readable by the map agent";; esac
+  fi
+  LMEM=$(printf '%s' "$MEMR" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  case "$LCP" in
+    "$LMEM"/key) deny "the signing key is not readable by the map agent";;
+    "$LMEM"/usage|"$LMEM"/usage/*|"$LMEM"/published|"$LMEM"/published/*)
+      deny "the plugin's private usage cache and publish records are not readable by the map agent";;
+  esac
   in_scope "$CP" || deny "path outside root, plugin, agent memory and ledger: $a"
 }
 is_file_op() { chk_path "$1"; [ -d "$CP" ] && deny "directory operand not allowed: $1"; return 0; }

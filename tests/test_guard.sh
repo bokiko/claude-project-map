@@ -818,6 +818,39 @@ run "a different command: no record" allow "$(mkin "$S2" "" "" Bash "$PROJ" "$(j
 chk "none of those registered anything" no "$(yes_no x "[ -e '$DATA/bind/$S2/roots.jsonl' ]")"
 run "main facts without session_id: allowed, writes nothing" allow "$(jq -nc --arg c "python3 $PLG/project-map-facts.py $R1" '{tool_name:"Bash",tool_input:{command:$c}}')"
 chk "no stray bind directory without session id" no "$(yes_no x "[ -d '$DATA/bind/' ] && ls '$DATA/bind' | grep -q '^$'")"
+echo "== main-mode records: roots anywhere in the home folder (3.2.3) =="
+# a home outside the scratchpad, so only the home rule decides
+H2="/private/tmp/pmhome-test.$$"; mkdir -p "$H2/code/app" "$H2/dev/x/y" "$H2/projects/p" "$H2/.config/app" "$H2/.claude/x" "$H2/Library/app"
+H2=$(cd -P "$H2" && pwd -P)
+hreg() { # sid root -> run the main facts call with HOME=$H2
+  printf '%s' "$(mkin "$1" "" "" Bash "$PROJ" "$(jq -nc --arg c "python3 $PLG/project-map-facts.py $2" '{command:$c}')")" \
+    | HOME="$H2" "$BASH" "$GUARD" >/dev/null 2>&1; }
+hrec() { yes_no x "jq -r .root '$DATA/bind/$1/roots.jsonl' 2>/dev/null | grep -Fxq '$2'"; }
+for d in code/app dev/x/y projects/p code; do
+  SH=$(nsid); hreg "$SH" "$H2/$d"; chk "home rule: ~/$d is registered" yes "$(hrec "$SH" "$H2/$d")"
+done
+for d in .config/app .claude/x Library/app Library; do
+  SH=$(nsid); hreg "$SH" "$H2/$d"; chk "home rule: ~/$d is NOT registered" no "$(hrec "$SH" "$H2/$d")"
+done
+SH=$(nsid); hreg "$SH" "$H2"; chk "home rule: \$HOME itself is NOT registered" no "$(yes_no x "[ -e '$DATA/bind/$SH/roots.jsonl' ]")"
+SH=$(nsid); hreg "$SH" "/private/tmp"; chk "home rule: a folder outside \$HOME is NOT registered" no "$(yes_no x "[ -e '$DATA/bind/$SH/roots.jsonl' ]")"
+ln -s "$H2/.config/app" "$H2/code/sneaky"
+SH=$(nsid); hreg "$SH" "$H2/code/sneaky"; chk "home rule: a symlink into a hidden folder is NOT registered" no "$(yes_no x "[ -e '$DATA/bind/$SH/roots.jsonl' ]")"
+SH=$(nsid); printf '%s' "$(mkin "$SH" "" "" Bash "$PROJ" "$(jq -nc --arg c "python3 $PLG/project-map-facts.py $H2/code/app" '{command:$c}')")" | HOME="relative" "$BASH" "$GUARD" >/dev/null 2>&1
+chk "home rule: a relative \$HOME registers nothing" no "$(yes_no x "[ -e '$DATA/bind/$SH/roots.jsonl' ]")"
+# Codex ROOT-1: case-insensitive volumes accept other spellings of Library (on a case-sensitive one these do not exist)
+for d in library/app LIBRARY/app lIbRaRy library; do
+  SH=$(nsid); hreg "$SH" "$H2/$d"; chk "home rule: ~/$d (other casing) is NOT registered" no "$(yes_no x "[ -e '$DATA/bind/$SH/roots.jsonl' ]")"
+done
+SH=$(nsid); hreg "$SH" "$H2/.CONFIG/app"; chk "home rule: ~/.CONFIG/app is NOT registered" no "$(yes_no x "[ -e '$DATA/bind/$SH/roots.jsonl' ]")"
+# Codex ROOT-2: HOME spelled with a trailing slash, a double slash, a dot component or through a symlink still works
+ln -s "$H2" "/private/tmp/pmhome-link.$$"
+for hv in "$H2/" "${H2%/*}//${H2##*/}" "$H2/./" "/private/tmp/pmhome-link.$$"; do
+  SH=$(nsid); printf '%s' "$(mkin "$SH" "" "" Bash "$PROJ" "$(jq -nc --arg c "python3 $PLG/project-map-facts.py $H2/code/app" '{command:$c}')")" | HOME="$hv" "$BASH" "$GUARD" >/dev/null 2>&1
+  chk "home rule: HOME=$hv still registers ~/code/app" yes "$(hrec "$SH" "$H2/code/app")"
+done
+rm -f "/private/tmp/pmhome-link.$$"
+rm -rf "$H2"
 echo "== main-mode records: facts anywhere in the command =="
 S5=$(nsid); RA="$TMP/projects/chain-a"; RB="$TMP/projects/chain-b"; mkdir -p "$RA" "$RB"
 mc() { run "$2" "$1" "$(mkin "$3" "" "" Bash "$PROJ" "$(jq -nc --arg c "$4" '{command:$c}')")"; }

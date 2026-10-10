@@ -1,7 +1,7 @@
 {
   "name": "project-map",
-  "version": "3.2.2",
-  "description": "One-page HTML project map for any project under a supported root: where the project is, what is stuck, what needs your decision. Cheap when nothing changed.",
+  "version": "3.2.3",
+  "description": "One-page HTML project map for any project in your home folder: where the project is, what is stuck, what needs your decision. Cheap when nothing changed.",
   "author": {
     "name": "bokiko"
   },

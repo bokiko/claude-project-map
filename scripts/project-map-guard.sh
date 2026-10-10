@@ -160,11 +160,19 @@ rp() {
   done
 }
 
-root_ok() {
-  case "$1" in
-    "$HOME"/projects/?*|"$HOME"/Desktop/?*|"$HOME"/thoughts/?*) return 0;;
-    /private/tmp/claude-*/*/scratchpad/?*) return 0;;
-  esac
+root_ok() { # a resolved path: any folder inside $HOME except $HOME itself, hidden top-level folders and ~/Library
+  case "$1" in /private/tmp/claude-*/*/scratchpad/?*) return 0;; esac
+  local h="" lp="" lh=""
+  case "$HOME" in /?*) h=$(cd -P "$HOME" 2>/dev/null && pwd -P) || h="";; esac
+  case "$h" in /?*) ;; *) h="";; esac
+  if [ -n "$h" ]; then
+    case "$1" in "$h"/?*)
+      # exclusions compared case-insensitively: macOS volumes accept ~/library for ~/Library
+      lp=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+      lh=$(printf '%s' "$h" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+      case "$lp" in "$lh"/.*|"$lh"/library|"$lh"/library/*) ;; *) return 0;; esac;;
+    esac
+  fi
   [ -n "${TMPDIR:-}" ] && case "$1" in "${TMPDIR%/}"/claude-*/?*) return 0;; esac
   return 1
 }

@@ -11,10 +11,10 @@
 
 <!-- TECH BADGES: flat-square style, unified color 2ecc71 -->
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.2.2-2ecc71?style=flat-square" alt="Version 3.2.2">
+  <img src="https://img.shields.io/badge/Version-3.2.3-2ecc71?style=flat-square" alt="Version 3.2.3">
   <img src="https://img.shields.io/badge/Python-3.9%2B-2ecc71?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Bash-3.2%2B-2ecc71?style=flat-square&logo=gnubash&logoColor=white" alt="Bash">
-  <img src="https://img.shields.io/badge/Tests-1972%20passing-2ecc71?style=flat-square" alt="1972 tests passing">
+  <img src="https://img.shields.io/badge/Tests-1993%20passing-2ecc71?style=flat-square" alt="1993 tests passing">
   <img src="https://img.shields.io/badge/License-MIT-2ecc71?style=flat-square" alt="License MIT">
 </p>
 
@@ -42,7 +42,7 @@ The command gives you a one-page view of where your project stands.
 It shows what is done, what comes next, and what needs your decision.
 Open the page in your browser, or read a short summary in Claude Code.
 
-**Needs:** Claude Code (2.1 or newer), plus `python3` 3.9+, `jq` and `git`, on macOS or Linux. Google Chrome is optional (only used for screenshots on the first map). It maps projects under `~/projects`, `~/Desktop` or `~/thoughts` (or a Claude scratchpad), never your home folder itself, and the path must not contain spaces or brackets.
+**Needs:** Claude Code (2.1 or newer), plus `python3` 3.9+, `jq` and `git`, on macOS or Linux. Google Chrome is optional (only used for screenshots on the first map). It maps any project folder inside your home folder, such as `~/code/my-app` or `~/projects/my-app`. It never maps the home folder itself, hidden folders like `~/.config`, or `~/Library`, and the path must not contain spaces or brackets.
 
 ## Get started in 3 steps
 
@@ -56,7 +56,7 @@ Open the page in your browser, or read a short summary in Claude Code.
 
 2. **Run `/reload-plugins` (or open a new Claude Code session).** The plugin's safety checks (hooks) load at session start and at `/reload-plugins`, nothing else. A session that has not done either will not have them.
 
-3. **Make your map.** Open Claude Code in a project folder under one of the supported locations above and type the skill's command at the Claude prompt (not in your shell):
+3. **Make your map.** Open Claude Code in your project folder and type the skill's command at the Claude prompt (not in your shell):
 
    ```text
    /project-map
@@ -113,7 +113,7 @@ See the [FAQ](docs/FAQ.md) for safety, costs, updates, and uninstalling.
 
 ## For developers
 
-Current plugin version: **3.2.2**. Projects without Git history are supported; they use documents and file modification times.
+Current plugin version: **3.2.3**. Projects without Git history are supported; they use documents and file modification times.
 
 ### Local installation
 
@@ -187,7 +187,7 @@ Every deny is logged to `~/.claude/agent-memory/project-map/guard.log`. These ch
 ### Tests
 
 ```bash
-bash tests/test_guard.sh    # 1009 cases: guard modes, binding, background launches, grammar, secret paths
+bash tests/test_guard.sh    # 1030 cases: guard modes, binding, background launches, grammar, secret paths
 bash tests/test_embed.sh    # 615 cases: facts + embed, generations, locks, migration
 bash tests/test_git.sh      # 219 cases: pm_git core and the pm-git.sh agent wrapper
 bash tests/test_hooks.sh    # 129 cases: SessionStart, UserPromptSubmit, SubagentStart/Stop hooks, preflight sentences

@@ -1,7 +1,7 @@
 ---
 name: project-map
 argument-hint: "[ROOT]"
-description: Build or refresh the one-page HTML project map for any project under a supported root (/project-map [ROOT]). Cheap when nothing changed.
+description: Build or refresh the one-page HTML project map for any project in your home folder (/project-map [ROOT]). Cheap when nothing changed.
 ---
 
 # /project-map [ROOT]
@@ -15,7 +15,7 @@ A SessionStart hook already shows the brief at the start of a session; this skil
 ## 0. Preflight (main session, before any spawn)
 ROOT = the argument, else `git rev-parse --show-toplevel`, else the cwd; take its realpath. If the toplevel is `$HOME`, use the cwd instead. Check, and on the first failure say the one sentence and stop:
 - ROOT is `$HOME` itself: "project-map needs a project folder, not your home directory."
-- ROOT is not inside `~/projects`, `~/Desktop`, `~/thoughts` or a Claude scratchpad (`/private/tmp/claude-*/`, `$TMPDIR/claude-*`): "project-map only maps folders under ~/projects, ~/Desktop or ~/thoughts."
+- ROOT is not inside your home folder (or a Claude scratchpad, `/private/tmp/claude-*/`, `$TMPDIR/claude-*`), or it is inside a hidden top-level folder (`~/.something`) or `~/Library`: "project-map only maps project folders inside your home folder (not hidden folders or ~/Library)."
 - ROOT contains a space, `[` or `]`: "project-map cannot map a path containing spaces or brackets; move or rename the folder."
 - `python3` missing or older than 3.9 (`python3 -c 'import sys;sys.exit(sys.version_info<(3,9))'`): "project-map needs python3 3.9 or newer."
 - `jq` missing: "project-map needs jq installed." `git` missing: "project-map needs git installed."

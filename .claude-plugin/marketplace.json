@@ -6,7 +6,7 @@
     {
       "name": "project-map",
       "source": "./",
-      "description": "One-page HTML project map for any project under a supported root: progress, stuck parts, open decisions. Cheap when nothing changed.",
+      "description": "One-page HTML project map for any project in your home folder: progress, stuck parts, open decisions. Cheap when nothing changed.",
       "category": "productivity"
     }
   ]

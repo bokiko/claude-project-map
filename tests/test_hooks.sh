@@ -436,7 +436,7 @@ fi
 SKILL="$HERE/skills/project-map/SKILL.md"
 for sentence in \
   "project-map needs a project folder, not your home directory." \
-  "project-map only maps folders under ~/projects, ~/Desktop or ~/thoughts." \
+  "project-map only maps project folders inside your home folder (not hidden folders or ~/Library)." \
   "project-map cannot map a path containing spaces or brackets; move or rename the folder." \
   "project-map needs python3 3.9 or newer." \
   "project-map needs jq installed." \

@@ -6,7 +6,7 @@
 
 ## Where does it work?
 
-On a project folder under `~/projects`, `~/Desktop` or `~/thoughts` (or a Claude scratchpad). Your home folder itself is never mapped, and the path must not contain spaces or brackets. If you are in a subfolder of a Git repository, the repository's top folder is the project. Outside these locations `/project-map` stops with one sentence saying so.
+On any project folder inside your home folder (or a Claude scratchpad). Your home folder itself, hidden top-level folders such as `~/.config`, and `~/Library` are never mapped, and the path must not contain spaces or brackets. If you are in a subfolder of a Git repository, the repository's top folder is the project. Outside these locations `/project-map` stops with one sentence saying so.
 
 ## Is it safe?
 

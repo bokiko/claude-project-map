@@ -410,7 +410,7 @@ format `%h %ad %s` with `--date=short`; `rev-parse` → `rev-parse HEAD`; `branc
 ## 8. Skill flow (`/project-map [ROOT]`)
 
 0. Preflight (main session, no spawn yet): ROOT = argument else `rev-parse --show-toplevel`
-   else cwd; realpath; not `$HOME`; under `~/projects`, `~/Desktop`, `~/thoughts` or a Claude
+   else cwd; realpath; not `$HOME`; inside `$HOME` but not a hidden top-level folder or `~/Library` (3.2.3), or a Claude
    scratchpad (`/private/tmp/claude-*/` or `$TMPDIR/claude-*`); no spaces, `[`, `]`; `python3 >= 3.9`,
    `jq`, `git` present (non-git ROOT allowed, said so); `PM/` creatable or writable; Chrome optional.
    One sentence on failure, stop.

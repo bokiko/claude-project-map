@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.3 (2026-10-10)
+### Changed
+- **Any project folder in your home folder works.** 3.2.2 only mapped projects under `~/projects`, `~/Desktop` or `~/thoughts`, so a project in `~/code` or `~/dev` failed after the facts step. The guard now accepts any folder inside `$HOME` except the home folder itself, hidden top-level folders (`~/.config`, `~/.ssh`, `~/.claude`, ...) and `~/Library`; Claude scratchpads stay allowed. Paths are resolved first, so a symlink into a hidden folder is refused; the exclusions are compared case-insensitively (macOS accepts `~/library` for `~/Library`), and `$HOME` itself is resolved, so a trailing slash or a symlinked home still works. Every other guard rule is unchanged. Codex review: AGREE after round 2 (round 1 found the casing bypass and the home spelling issue).
+- Skill preflight sentence, README, FAQ, contract and manifests say the same.
+- Suites: guard 1030 (21 new home-rule cases), git 219, embed 615, hooks 129 (1993 cases), each under `bash` and `/bin/bash` 3.2.
+
 ## 3.2.2 (2026-10-08)
 ### Fixed
 - **Agent wrote its judgement from a shell.** On a live UPDATE the Sonnet agent tried to produce `judgement.out.json` with `cd ... && python3 - <<EOF`; the guard denied it (by design: Bash is only for `pm-git.sh` and `project-map-embed.sh`) and the agent stopped with PARTIAL, so the map stayed stale. The agent prompt now states that rule explicitly and tells it to compose the JSON itself and save it with the Write tool; Bash is scoped per run type (UPDATE: the two scripts; FULL: also the read-only commands in `full-run.md`) and placeholders are explained. No guard change. Codex AGREE (round 2). Verified by a headless run and a real interactive session (background launch, Read, Read, Write, embed, no denials).

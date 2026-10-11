@@ -501,7 +501,7 @@ def state_problem(S):
 def load_prev(pm):
     """What exists under PM. kind: none | v4 | legacy | invalid. One pinned read of `current`."""
     P = {"kind": "none", "why": "", "gen": None, "state": None, "judgement": None, "plan": None, "decisions": [],
-         "judged_key": None, "applied": 0, "applied_hash": None, "retired": []}
+         "judged_key": None, "applied": 0, "applied_hash": None, "retired": [], "replay": False}
     if C.current_exists(pm):
         gen = C.current_gen(pm)
         P["gen"] = gen
@@ -546,6 +546,10 @@ def load_prev(pm):
         ov = (C.load_json(os.path.join(pm, "cache.json"), {}) or {}).get("answers_accept")
         if isinstance(ov, dict) and ov.get("gen") == gen and isinstance(ov.get("applied"), int):
             P["applied"], P["applied_hash"] = ov["applied"], ov.get("applied_hash")
+            P["replay"] = True   # an outstanding --accept-answers rebaseline: its rewritten prefix is not consumed until a judgement
+            if "accepted" in ov:   # 3.5: the focus a replay computed (the last F-set line of the file, or none)
+                acc = ov["accepted"]
+                P["accepted_override"] = {"accepted": acc if _rec_ok(acc, ("outcome", "done_when", "exclusions", "hash", "line")) else None}
         return P
     sp = os.path.join(pm, "state.json")
     if os.path.isfile(sp) and not os.path.islink(sp):
@@ -908,6 +912,12 @@ def read_answers_ex(pm):
     return [(no, ln.rstrip(b"\r")) for no, ln in enumerate(parts[:-1], 1) if ln.strip()], bool(parts[-1].strip())
 
 
+def answers_image(pm):
+    """ONE read of answers.jsonl as the (lines, tail) image that a caller hands to collect() and to its own decisions, so the
+    decision and the snapshot describe the same bytes (embed --apply-answers, 14.3)."""
+    return read_answers_ex(pm)
+
+
 def read_answers(pm):
     """The complete lines of answers.jsonl (see read_answers_ex)."""
     return read_answers_ex(pm)[0]
@@ -920,6 +930,44 @@ def prefix_hash(lines, n):
     return h.hexdigest()
 
 
+# an owner line's `at`: absent, or a clean ISO-8601 timestamp that starts with its date (it is shown on the page, in the handoff and
+# stored in the state, so it is validated like every other string an owner line can put there)
+_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?")
+
+
+def at_problem(at):
+    """None when `at` is absent (null) or a clean timestamp; else why not. Strings only, at most 40 characters, no control, bidi,
+    zero-width or line-separator character and nothing secret-shaped, the strict ISO shape, and a value the parser accepts."""
+    if at is None:
+        return None
+    if not isinstance(at, str) or len(at) > 40:
+        return "at must be an ISO-8601 timestamp of at most 40 characters"
+    if C.unsafe_strings([at], "at") or C.display_safe(at) != at or not _AT_RE.fullmatch(at) or C.parse_iso(at) is None:
+        return "at must be an ISO-8601 timestamp (no control characters or other text)"
+    return None
+
+
+F_SET = "F-set"          # the one owner record that is not a decision answer: the confirmed focus (14.2)
+FOCUS_MAX = 120          # bytes: outcome (answer) and done-when (note)
+EXCL_MAX, EXCL_N = 80, 3  # bytes per exclusion, how many
+
+
+def _focus_problem(o):
+    """Why an F-set line is unusable (None when fine). `answer` is the outcome, `note` (REQUIRED) the done-when, `exclusions`
+    (optional) at most three short strings. Every string must be display-safe and secret-free: such a line is `bad` and
+    never stored, so the accepted record can only hold text that is safe to put on the page, in the brief and in the handoff."""
+    for what, v in (("answer (the outcome)", o.get("answer")), ("note (done when)", o.get("note"))):
+        if not isinstance(v, str) or not 1 <= C.blen(v) <= FOCUS_MAX:
+            return "F-set %s must be a string of 1..%d bytes" % (what, FOCUS_MAX)
+    ex = o.get("exclusions", [])
+    if not isinstance(ex, list) or len(ex) > EXCL_N or not all(isinstance(x, str) and 1 <= C.blen(x) <= EXCL_MAX for x in ex):
+        return "F-set exclusions must be at most %d strings of 1..%d bytes" % (EXCL_N, EXCL_MAX)
+    strings = [o["answer"], o["note"]] + list(ex)
+    if C.unsafe_strings(strings, "F-set") or any(C.display_safe(x) != x for x in strings):
+        return "F-set text holds control characters or looks like a secret"
+    return None
+
+
 def parse_pending(lines):
     pending, bad = [], []
     for no, raw in lines:
@@ -930,27 +978,107 @@ def parse_pending(lines):
         if not (isinstance(o, dict) and isinstance(o.get("id"), str) and isinstance(o.get("answer"), str)):
             bad.append({"line": no, "why": "not a JSON object with string id and answer"})
             continue
-        extra = sorted(set(o) - {"id", "answer", "at", "by", "note"})
+        focus = o["id"] == F_SET
+        extra = sorted(set(o) - {"id", "answer", "at", "by", "note"} - ({"exclusions"} if focus else set()))   # exclusions: F-set only
         if extra:
             bad.append({"line": no, "why": "unknown keys: %s" % ", ".join(map(str, extra))[:60]})
             continue
-        if o.get("by", "owner") != "owner" or not (o.get("at") is None or (isinstance(o.get("at"), str) and len(o["at"]) <= 40)):
-            bad.append({"line": no, "why": "by must be \"owner\" and at a short ISO string"})
+        if o.get("by", "owner") != "owner":
+            bad.append({"line": no, "why": "by must be \"owner\""})
+            continue
+        why_at = at_problem(o.get("at"))
+        if why_at:
+            bad.append({"line": no, "why": why_at})
             continue
         note = o.get("note")
         if note is not None and (not isinstance(note, str) or C.blen(note) > 16384):
             bad.append({"line": no, "why": "note must be a string of at most 16384 bytes"})
             continue
-        pending.append({"id": o["id"], "answer": o["answer"], "at": o["at"] if isinstance(o.get("at"), str) else None,
-                        "by": o["by"] if isinstance(o.get("by"), str) else "owner", "note": note, "line": no})
+        rec = {"id": o["id"], "answer": o["answer"], "at": o["at"] if isinstance(o.get("at"), str) else None,
+               "by": o["by"] if isinstance(o.get("by"), str) else "owner", "note": note, "line": no}
+        if focus:
+            why = _focus_problem(o)
+            if why:
+                bad.append({"line": no, "why": why})
+                continue
+            rec["exclusions"] = list(o.get("exclusions", []))
+        pending.append(rec)
     return pending, bad
 
 
-def apply_answers(by_id, pending):
-    """Apply owner answers (in file order, the last one per decision wins) to by_id's open/overdue decisions in place.
-    -> list of bad {line, why}."""
+# ---- the confirmed focus (14.1-14.3): state.intent = {accepted, proposed, target}
+def accepted_record(a):
+    """The owner's record, a PURE function of one F-set line (so --accept-answers replays deterministically)."""
+    ex = list(a.get("exclusions") or [])
+    return {"outcome": a["answer"], "done_when": a["note"], "exclusions": ex, "hash": C.intent_hash(a["answer"], a["note"], ex),
+            "at": a.get("at"), "line": a["line"]}
+
+
+def _rec_ok(x, keys):
+    return isinstance(x, dict) and all(k in x for k in keys) and isinstance(x.get("hash"), str) \
+        and isinstance(x.get("outcome"), str) and isinstance(x.get("done_when"), str) \
+        and (not isinstance(x.get("exclusions", []), list) or all(isinstance(e, str) for e in x.get("exclusions", [])))
+
+
+def intent_of(S):
+    """A published state's intent, shape-checked: {accepted, proposed, target}, each a well-formed record or None. A state from
+    before 3.5 (no intent) and anything malformed give None entries; nothing here raises."""
+    it = S.get("intent") if isinstance(S, dict) else None
+    out = {"accepted": None, "proposed": None, "target": None}
+    if isinstance(it, dict):
+        for k, keys in (("accepted", ("outcome", "done_when", "exclusions", "hash", "line")), ("proposed", ("outcome", "done_when", "hash")),
+                        ("target", ("outcome", "done_when", "exclusions", "hash"))):
+            if _rec_ok(it.get(k), keys):
+                out[k] = copy.deepcopy(it[k])
+    return out
+
+
+def intent_base(prev):
+    """The intent a collection starts from: the pinned state's, with the accepted record replaced by the one a
+    `--accept-answers` replay computed for this very generation (a replay that found no F-set line makes it null)."""
+    it = intent_of(prev.get("state")) if prev.get("kind") == "v4" else intent_of(None)
+    ao = prev.get("accepted_override")
+    if isinstance(ao, dict):
+        it["accepted"] = copy.deepcopy(ao["accepted"])
+    return it
+
+
+def reconcile_intent(it):
+    """A proposal that says what the accepted focus says is no proposal (the model cannot set exclusions, so they are the
+    accepted record's own)."""
+    a, p = it.get("accepted"), it.get("proposed")
+    if a and p and C.intent_hash(p["outcome"], p["done_when"], a.get("exclusions")) == a["hash"]:
+        it["proposed"] = None
+    return it
+
+
+def confirmation_only(prev_state, lines, applied):
+    """14.3 fast-path predicate (facts' `decide` and `embed --mechanical --apply-answers` use exactly this): True iff the pinned
+    state has an intent.target, its accepted record is null or equal to it, and every COMPLETE line after `applied` (at least
+    one) is a well-formed F-set whose identity (exclusions included) equals target.hash. A decision answer, a bad line, another
+    intention or one with other exclusions is not a confirmation. `lines`: read_answers_ex(pm)[0]."""
+    it = intent_of(prev_state)
+    tg, acc = it["target"], it["accepted"]
+    if tg is None or (acc is not None and acc["hash"] != tg["hash"]):
+        return False
+    rest = lines[applied:]
+    if not rest:
+        return False
+    pending, bad = parse_pending(rest)
+    return not bad and len(pending) == len(rest) and all(
+        a["id"] == F_SET and C.intent_hash(a["answer"], a["note"], a.get("exclusions")) == tg["hash"] for a in pending)
+
+
+def apply_answers(by_id, pending, intent=None):
+    """THE reducer for owner lines (14.2), in file order. A `D-` line answers an open/overdue decision of by_id (the last one
+    per decision wins); an `F-set` line sets intent["accepted"] (the last one wins) and is never a decision answer. With
+    intent=None an F-set line is skipped. -> list of bad {line, why}."""
     bad, applied = [], {}
     for a in pending:
+        if a["id"] == F_SET:
+            if intent is not None:
+                intent["accepted"] = accepted_record(a)
+            continue
         d = by_id.get(a["id"])
         if not d:
             bad.append({"line": a["line"], "why": "unknown or closed decision %s" % a["id"]})
@@ -965,10 +1093,11 @@ def apply_answers(by_id, pending):
     return bad
 
 
-def lifecycle(prev_decs, pending, t):
-    """Apply answers and expiries to a copy of the previous OPEN/OVERDUE decisions (closed ones are dropped here)."""
+def lifecycle(prev_decs, pending, t, intent=None):
+    """Apply answers and expiries to a copy of the previous OPEN/OVERDUE decisions (closed ones are dropped here). `intent`
+    (optional, mutated in place) receives the F-set lines through the same reducer."""
     by_id = {d["id"]: dict(d) for d in prev_decs if d.get("status") in ("open", "overdue")}
-    bad = apply_answers(by_id, pending)
+    bad = apply_answers(by_id, pending, intent)
     for d in by_id.values():
         if d["status"] in ("open", "overdue"):
             dl = C.parse_iso(d.get("deadline"))
@@ -987,8 +1116,10 @@ def late_answers(pm, snap, ids, image=None):
     `ids` by events (INTERFACES 12.5). None when no valid new answer targets one of them: the new lines then stay pending
     exactly as before (the key's answers_count marks the map for a re-judgement). Otherwise every line appended since is
     applied in file order to the staged open decisions (the applied count is a prefix, so a later answer cannot be applied
-    alone) and the owner's answer wins: -> {decisions, answers, won}, the staged view with those decisions answered and
-    answers.applied advanced past the new lines. Raises AnswersRewritten when the staged prefix no longer matches.
+    alone) and the owner's answer wins: -> {decisions, answers, intent, won}, the staged view with those decisions answered and
+    answers.applied advanced past the new lines. 3.5.0: "every line" includes the owner's F-set lines, which go through the same
+    reducer into `intent` (what the owner's record is at publication); `won` is still decided from D- lines only, so an F-set
+    alone is not a late answer (None: it stays pending). Raises AnswersRewritten when the staged prefix no longer matches.
     `image`: the complete lines of ONE read of answers.jsonl (read_answers_ex(pm)[0]) when the caller also needs the
     unterminated-tail flag of that same read; the file is then not read again, so the tail flag and the late answers
     describe the same bytes (Codex OV330-R4-1)."""
@@ -1002,15 +1133,17 @@ def late_answers(pm, snap, ids, image=None):
         return None
     pending, bad = parse_pending(lines[a["total"]:])
     by_id = {d["id"]: dict(d) for d in snap["decisions"] if d.get("status") in ("open", "overdue")}
-    bad += apply_answers(by_id, pending)
-    won = sorted(i for i in ids if (by_id.get(i) or {}).get("status") == "answered")
+    intent = reconcile_intent(copy.deepcopy(snap.get("intent") or intent_of(None)))   # staged view, then ALL appended lines
+    bad += apply_answers(by_id, pending, intent)
+    reconcile_intent(intent)
+    won = sorted(i for i in ids if (by_id.get(i) or {}).get("status") == "answered")   # decided by D- lines only
     if not won:
         return None
     ph = prefix_hash(lines, len(lines))
     return {"decisions": [by_id[d["id"]] if (by_id.get(d["id"]) or {}).get("status") == "answered" else d for d in snap["decisions"]],
             "answers": dict(a, total=len(lines), applied=len(lines), applied_hash=ph, total_hash=ph, pending=[],
                             bad=list(a["bad"]) + bad),
-            "won": won}
+            "intent": intent, "won": won}
 
 
 # ---------------------------------------------------------------- usage / hashes
@@ -1082,8 +1215,11 @@ def plugin_hashes():
 
 
 # ---------------------------------------------------------------- the collector
-def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False, usage_timeout=60.0, usage_until=None, usage_prev=None):
+def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False, usage_timeout=60.0, usage_until=None, usage_prev=None,
+            answers_image=None, image_out=None):
     """Build the complete snapshot (6.1). hash_deadline: absolute time.monotonic() limit for content hashing only.
+    answers_image: (lines, tail) of ONE read_answers_ex the caller already made (embed --apply-answers, 14.3: the decision and
+    the snapshot then describe the same bytes); image_out (a dict) receives {lines, tail} of the read this collection used.
     Raises GitCollectError, AnswersRewritten."""
     t = C.now()
     pm = os.path.join(root, ".project-map")
@@ -1128,7 +1264,9 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     lname = pj.get("ledger") if isinstance(pj.get("ledger"), str) else None
     ledger = parse_ledger(root, lname)
 
-    lines, tail = read_answers_ex(pm)
+    lines, tail = answers_image if answers_image is not None else read_answers_ex(pm)
+    if image_out is not None:
+        image_out.update(lines=lines, tail=tail)
     ap, ah = prev["applied"], prev["applied_hash"]
     if prev["kind"] == "none":
         ap, ah = 0, C.sha256_bytes(b"")
@@ -1139,7 +1277,9 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     if prefix_hash(lines, ap) != ah:
         raise AnswersRewritten("answers rewritten")
     pending, bad = parse_pending(lines[ap:])
-    decs, bad2 = lifecycle(prev["decisions"], pending, t)
+    intent = intent_base(prev)
+    decs, bad2 = lifecycle(prev["decisions"], pending, t, intent)   # one reducer: D- lines answer decisions, F-set sets intent.accepted
+    reconcile_intent(intent)
     bad += bad2
     expired = sorted(d["id"] for d in decs if d.get("status") in ("overdue", "defaulted"))
     th, eh = plugin_hashes()
@@ -1148,7 +1288,9 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
            "release": {r["path"]: r["release"]["key"] for r in repos if r.get("release")},
            "watch_hashes": {w["path"]: w["hash"] for w in wl},
            "ledger_hash": ledger["hash"] if ledger else None, "answers_count": len(lines), "expired_ids": expired,
-           "schema": C.SCHEMA_STATE}
+           "schema": C.SCHEMA_STATE,
+           # 14.3: the OPERATIVE intention's identity: the owner's accepted record, else what the last judgement served
+           "intent_hash": intent["accepted"]["hash"] if intent["accepted"] else (intent["target"] or {}).get("hash")}
     usage = None
     if want_usage:   # usage_until (absolute time.monotonic()) is evaluated NOW, after the git and hashing work above
         ut = usage_timeout if usage_until is None else min(usage_timeout, usage_until - time.monotonic())
@@ -1162,7 +1304,7 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
         "answers": {"total": len(lines), "applied": ap, "applied_hash": ah, "total_hash": prefix_hash(lines, len(lines)),
                     "pending": pending, "bad": bad, "tail": tail},
         "decisions": decs, "usage": usage, "key": key, "prev_key": prev.get("judged_key"),
-        "template_hash": th, "embed_hash": eh,
+        "template_hash": th, "embed_hash": eh, "intent": intent,
     }
     snap["since"] = since_baseline(prev, t, snap["commits"]["count"], len(dirty))
     return snap
@@ -1187,8 +1329,8 @@ def compare_keys(judged, key, snap):
     if not isinstance(judged, dict):
         return {"moved": ["heads"], "git": True, "adopt": [], "why": "no judged key", "incomplete": [], "unverified": []}
     moved, adopt = [], []
-    for k in ("heads", "branches", "status_hash", "ledger_hash", "answers_count", "expired_ids", "schema"):
-        if key.get(k) != judged.get(k) and (k in judged or k in ("heads",)):
+    for k in ("heads", "branches", "status_hash", "ledger_hash", "answers_count", "intent_hash", "expired_ids", "schema"):
+        if key.get(k) != judged.get(k) and (k in judged or k in ("heads",)):   # a key judged before 3.5 has no intent_hash: not a move
             moved.append(k)
     # release (3.3.0): a key judged before 3.3.0 has no "release" entry; that forces ONE re-judgement, after which the
     # new key is stored. Raw behind counts and recent tags are not in the key, so they never re-judge.
@@ -1240,8 +1382,11 @@ def compare_keys(judged, key, snap):
         why.append(" and ".join(rel_why) or "tags changed")
     if "ledger_hash" in moved:
         why.append("ledger changed")
-    if "answers_count" in moved:
-        why.append("%d pending answers" % max(len(snap["answers"]["pending"]), 1))
+    pend = snap["answers"]["pending"]
+    if "intent_hash" in moved:   # a different focus is set by the owner (a confirmation of the served one does not move this)
+        why.append("focus set by owner")
+    if "answers_count" in moved and not ("intent_hash" in moved and pend and all(a.get("id") == F_SET for a in pend)):
+        why.append("%d pending answers" % max(len(pend), 1))
     if deferred_moved:
         moved.append("closure_deferred")
         if "answers_count" not in moved[:-1]:
@@ -1257,9 +1402,16 @@ def compare_keys(judged, key, snap):
 # ---------------------------------------------------------------- pack (6.2)
 def build_pack(snap, inv_name):
     """Bounded model-facing view, <= 8192 bytes. Trim order: commit items, watch hashes, ledger, answers, decisions, usage."""
-    p = {k: snap[k] for k in ("schema", "base", "root", "facts_at", "repos", "commits", "status", "watch", "ledger",
-                              "answers", "decisions", "usage", "watch_dropped", "dirty_paths", "template_hash")}
+    p = {k: snap[k] for k in ("schema", "base", "root", "facts_at")}
     p["since"] = snap.get("since")   # 13.1: the baseline the model judges against; small, never trimmed
+    # 14.4: the owner's immediate objective and the standing proposal, RESERVED (placed before every optional detail, never
+    # trimmed, part of every size measurement below): the model copies accepted and cannot change it
+    it = snap.get("intent") or {}
+    acc, prop = it.get("accepted"), it.get("proposed")
+    p["intent"] = {"accepted": {k: acc.get(k) for k in ("outcome", "done_when", "exclusions")} if isinstance(acc, dict) else None,
+                   "proposed": {k: prop.get(k) for k in ("outcome", "done_when")} if isinstance(prop, dict) else None}
+    p.update({k: snap[k] for k in ("repos", "commits", "status", "watch", "ledger", "answers", "decisions", "usage", "watch_dropped",
+                                   "dirty_paths", "template_hash")})
     p = C.loads(C.dumps(p))   # deep copy
     p["schema"] = "project-map-pack-1"
     p["generation"] = inv_name

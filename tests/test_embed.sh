@@ -60,6 +60,8 @@ rejraw() { # NAME RAWTEXT SUBSTRING
   if [ $r -eq 1 ] && case "$o" in *PM_EMBED_ERROR*"$3"*) true;; *) false;; esac && [ "$(cur)" = "$c0" ]; then ok "reject: $1"; else bad "reject: $1" "rc=$r out=${o:0:300}"; fi
 }
 
+if [ "${PM_FC_ONLY:-}" != 1 ]; then   # PM_FC_ONLY=1 runs section 15 alone (the 3.5.0 mutation checks); see the `fi` before section 15
+
 # ======================================================================================================
 # 0. argument handling and unsupported locations
 # ======================================================================================================
@@ -115,7 +117,7 @@ t_eq "F-stage snapshot repos[0] is git with a 40-hex-derived head" "$(get "$STAG
 t_eq "F-stage snapshot commits: 1 commit listed" "$(get "$STAGE/snapshot.json" '(d["commits"]["count"],d["commits"]["listed"])')" "(1, 1)"
 t_eq "F-stage snapshot ledger is the newest local ledger (absolute path)" "$(get "$STAGE/snapshot.json" 'd["ledger"]["path"].endswith("thoughts/ledgers/demo-engine.md") and d["ledger"]["path"].startswith("/")')" True
 t_eq "F-stage snapshot ledger sections parsed (goal / next / blockers)" "$(get "$STAGE/snapshot.json" '(d["ledger"]["goal"],d["ledger"]["next"],d["ledger"]["blockers"])')" "('- goal line', '1. step', '- b1')"
-t_eq "F-stage snapshot key has the 9 components" "$(get "$STAGE/snapshot.json" 'sorted(d["key"])')" "['answers_count', 'branches', 'expired_ids', 'heads', 'ledger_hash', 'release', 'schema', 'status_hash', 'watch_hashes']"
+t_eq "F-stage snapshot key has the 10 components (3.5.0: intent_hash, null on a first map)" "$(get "$STAGE/snapshot.json" 'sorted(d["key"])')" "['answers_count', 'branches', 'expired_ids', 'heads', 'intent_hash', 'ledger_hash', 'release', 'schema', 'status_hash', 'watch_hashes']"
 t_eq "F-stage snapshot answers baseline: applied 0, no pending" "$(get "$STAGE/snapshot.json" '(d["answers"]["applied"],len(d["answers"]["pending"]))')" "(0, 0)"
 t_true "F-stage pack <= 8192 bytes" "[ \$(wc -c < $STAGE/pack.json) -le 8192 ]"
 t_eq "F-stage pack drops the raw keys for digests" "$(get "$STAGE/pack.json" '"key" not in d and len(d["key_digest"])==12')" True
@@ -124,8 +126,8 @@ jud "$INVN" full ""; eo=$(embed "$INVN"); erc=$?
 t_true "E-publish: PM_EMBED_OK gen <seq>-<id> <bytes>, exit 0" "[ $erc = 0 ] && echo '$eo' | grep -qE '^PM_EMBED_OK gen 000001-[0-9a-f]{8} [0-9]+\$'"
 G=$(gen)
 t_true "E-layout current -> gen-000001-<id8> (one symlink)" "[ -L $PM/current ] && [ \"\$(cur)\" = gen-$G ]"
-t_true "E-layout stable links index mobile brief state -> current/<name>" "for n in index.html mobile.html brief.txt state.json; do [ \"\$(readlink $PM/\$n)\" = current/\$n ] || exit 1; done"
-t_true "E-layout generation files exist" "for n in manifest.json state.json index.html mobile.html brief.txt snapshot.json pack.json plan.json judgement.json; do [ -f $PM/gen-$G/\$n ] || exit 1; done"
+t_true "E-layout stable links index mobile brief state handoff -> current/<name> (five since 3.5.0)" "for n in index.html mobile.html brief.txt state.json handoff.txt; do [ \"\$(readlink $PM/\$n)\" = current/\$n ] || exit 1; done"
+t_true "E-layout generation files exist" "for n in manifest.json state.json index.html mobile.html brief.txt handoff.txt snapshot.json pack.json plan.json judgement.json; do [ -f $PM/gen-$G/\$n ] || exit 1; done"
 t_true "E-layout invocation/ is a copy of the staging dir (audit trail)" "[ -f $PM/gen-$G/invocation/judgement.out.json ] && [ -f $PM/gen-$G/invocation/plan.out.json ] && [ -f $PM/gen-$G/invocation/snapshot.json ]"
 t_true "E-stage-retain: STAGE is still in place after a successful publish" "[ -f $STAGE/judgement.out.json ]"
 t_eq "E-manifest generation and base" "$(get "$PM/current/manifest.json" '(d["generation"],d["base"])')" "('$G', None)"
@@ -145,7 +147,7 @@ t_eq "E-state phases derived: P1 done, P2 current, P3 next" "$(S '[(p["id"],p["s
 t_eq "E-state phase done/total per phase" "$(S '[(p["done"],p["total"]) for p in d["phases"]]')" "[(1, 1), (0, 4), (0, 0)]"
 t_eq "E-state focus: phase, done, total, next_step" "$(S '(d["focus"]["phase"],d["focus"]["done"],d["focus"]["total"],d["focus"]["next_step"]["actor"])')" "('P2', 0, 4, 'claude')"
 t_eq "E-state coverage complete" "$(S 'd["coverage"]["coverage"]')" complete
-t_eq "E-state judged_key holds the facts key; answers baseline recorded" "$(S '(sorted(d["judged_key"])==["answers_count","branches","expired_ids","heads","ledger_hash","release","schema","status_hash","watch_hashes"], d["answers"]["applied"])')" "(True, 0)"
+t_eq "E-state judged_key holds the facts key; answers baseline recorded" "$(S '(sorted(d["judged_key"])==["answers_count","branches","expired_ids","heads","intent_hash","ledger_hash","release","schema","status_hash","watch_hashes"], d["answers"]["applied"])')" "(True, 0)"
 t_eq "E-state history has one run, run.n 1" "$(S '(len(d["history"]),d["run"]["n"])')" "(1, 1)"
 t_eq "E-state decisions: D-001 open (not ready), D-002 hard-rule open" "$(S '[(x["id"],x["status"],x["default"]) for x in d["decisions"]]')" "[('D-001', 'open', 'hold'), ('D-002', 'open', 'hold')]"
 t_eq "E-state watch recorded from the first snapshot (README PLAN docs ledgers)" "$(S 'd["watch"]')" "['README.md', 'PLAN.md', 'docs', 'thoughts/ledgers']"
@@ -742,7 +744,7 @@ PY"
   t_eq "E-crash-$stage: no mixed generation (state, meta, brief agree)" "$(lib reader "$PM" 0.3 | cut -d' ' -f2)" 0
   if [ $exp = old ]; then eo=$(embed "$INVN"); erc=$?; t_true "E-crash-$stage: retrying the same staging publishes" "[ $erc = 0 ]"; fi
   out=$(facts); t_true "E-crash-$stage: facts prints a verdict afterwards" "case '$out' in NO_CHANGE*|NEEDS_*) true;; *) false;; esac"
-  t_true "E-crash-$stage: facts repaired the four stable links" "for n in index.html mobile.html brief.txt state.json; do [ \"\$(readlink $PM/\$n)\" = current/\$n ] || exit 1; done"
+  t_true "E-crash-$stage: facts repaired the five stable links" "for n in index.html mobile.html brief.txt state.json handoff.txt; do [ \"\$(readlink $PM/\$n)\" = current/\$n ] || exit 1; done"
   t_true "E-crash-$stage: incomplete generation dirs were swept" "! ls $PM | grep -q '\\.tmp\$' && for d in $PM/gen-*; do [ -f \$d/manifest.json ] || exit 1; done"
   if [ $exp = new ]; then eo=$(embed "$INVN"); erc=$?; t_true "E-crash-$stage: the staging is SUPERSEDED after the pointer moved" "[ $erc = 4 ]"; fi
 done
@@ -950,7 +952,7 @@ mkrepo mg2; lib legacy "$R"; begin; jud "$INVN" full ''; PM_EMBED_CRASH_AT=point
 t_eq "E-migrate-links: killed after the pointer rename" "$rc" 99
 t_true "E-migrate-links: current exists but the stable paths are still legacy regular files" "[ -L $PM/current ] && [ ! -L $PM/state.json ] && [ -f $PM/state.json ]"
 out=$(facts); t_true "E-migrate-links: facts repairs the links and does not report NO_CHANGE blindly" "case '$out' in NO_CHANGE*|NEEDS_*) true;; *) false;; esac"
-t_true "E-migrate-links: all four stable paths are symlinks into current/" "for n in index.html mobile.html brief.txt state.json; do [ \"\$(readlink $PM/\$n)\" = current/\$n ] || exit 1; done"
+t_true "E-migrate-links: all five stable paths are symlinks into current/" "for n in index.html mobile.html brief.txt state.json handoff.txt; do [ \"\$(readlink $PM/\$n)\" = current/\$n ] || exit 1; done"
 t_eq "E-migrate-links: state.json through the stable link is the new schema" "$(S 'd["schema"]')" "project-map-4"
 # crash before the pointer during migration keeps the legacy map intact
 mkrepo mg3; lib legacy "$R"; begin; jud "$INVN" full ''; PM_EMBED_CRASH_AT=manifest embed "$INVN" >/dev/null 2>&1
@@ -3124,8 +3126,8 @@ if [ $HAVE_NODE = 1 ]; then
   t_eq "RB-page: the page script ran without error and the section is shown" "$(pj '(d["error"], d["sinceHidden"])')" "(None, False)"
   t_has "RB-page: eyebrow: Since the previous assessment · <date>" "$(pj 'd["since"][0]')" "Since the previous assessment · 20"
   t_eq "RB-page: the count line is '<N> commits · <M> uncommitted files'" "$(pj 'd["since"][1]')" "0 commits · 1 uncommitted files"
-  t_eq "RB-page: the attention row and both change rows" "$(pj 'd["since"][2:5]')" "['Attention · continue | Work can continue without the owner | Nothing is blocked on you', '<script>alert(1)</script> landed | landed, not checked by the map', 'Plan <b>edited</b> | uncommitted']"
-  t_eq "RB-page: not checked: ..." "$(pj 'd["since"][5]')" "not checked: <img src=x onerror=alert(1)>"
+  t_eq "RB-page: the attention row, the focus row (3.5.0, under the attention row) and both change rows" "$(pj 'd["since"][2:6]')" "['Attention · continue | Work can continue without the owner | Nothing is blocked on you', 'focus: Ship the engine import (proposed, not confirmed)', '<script>alert(1)</script> landed | landed, not checked by the map', 'Plan <b>edited</b> | uncommitted']"
+  t_eq "RB-page: not checked: ..." "$(pj 'd["since"][6]')" "not checked: <img src=x onerror=alert(1)>"
   t_eq "RB-page: the text from the repository stayed text: no script or iframe element was ever created" "$(pj '(d["scripts"], "img" in d["created"], "script" in d["created"])')" "(0, False, False)"
   mkproj rbp0 || true
   rbpage
@@ -3250,5 +3252,663 @@ jud "$INVN" update 'J["watch"]=J.get("watch",[])+["docs/added2.md"]'
 eo=$(embed "$INVN")
 t_pre "RB-pubwatch: a timely check publishes" "$eo" "PM_EMBED_OK gen"
 t_eq "RB-pubwatch: a timely check keeps coverage complete and adds its counts" "$(S '(d["coverage"]["coverage"], d["coverage"]["covered"], d["coverage"]["total"])')" "$(python3 -c "import sys; c,t=eval(sys.argv[1]); print(('complete', c+1, t+1))" "$cov0")"
+
+fi   # PM_FC_ONLY=1 skips sections 0-14 (used for the 3.5.0 mutation checks); the helpers below are self-contained
+
+# ======================================================================================================
+# 15. 3.5.0: confirmed focus and handoff (FC-*): intent, F-set, model-free confirmation, handoff.txt (INTERFACES-3.2 section 14)
+# ======================================================================================================
+HAVE_NODE=0; command -v node >/dev/null 2>&1 && HAVE_NODE=1
+rbpage() { PAGE=$(node "$TD/pm_page.js" "$PM/index.html" "$@" 2>&1); }   # [STATE_PATCH_JSON]: what the page JavaScript renders
+pj()  { printf '%s' "$PAGE" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(eval(sys.argv[1]))' "$1"; }
+bf()  { lib brief "$PM/state.json" "$1"; }                               # CODE edits the published state in memory, then the brief
+ax()  { AXJ=$(lib assure "$PM/state.json" "$1"); }
+axq() { printf '%s' "$AXJ" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(eval(sys.argv[1]))' "$1"; }
+RW_TP='{"kind":"tag_at_head","repo":".","name":"v1.0.0"}'; RW_SY='{"kind":"branch_in_sync","repo":"."}'
+ovraise() { printf '%s' 'J["decisions"][1]["resolves_when"]=['"$1"']; '"$2"; }
+ovj() { printf '%s' 'J["decisions"][0]["ready"]=True; J["decisions"][1]["overtaken"]={"why":"Owner tagged v1.0.0 and pushed by hand"}; '"$1"; }
+ovpush() { (cd "$R" && git tag v1.0.0 && git init -q --bare "$T/$1-origin.git" && git remote add origin "$T/$1-origin.git" && git push -q -u origin main 2>/dev/null); }
+FC_O="Ship the engine import"; FC_D="The import runs on the fixture project"   # pm_testlib.PROPOSAL, the fixed proposal every judgement makes
+fcset() { # OUTCOME DONE_WHEN [EXCLUSIONS_JSON]: append an F-set line (the owner's record) to answers.jsonl
+  python3 - "$PM/answers.jsonl" "$@" <<'PY'
+import json, sys
+p, o, d = sys.argv[1:4]
+r = {"id": "F-set", "answer": o, "note": d, "at": "2026-10-11T10:00:00+03:00", "by": "owner"}
+if len(sys.argv) > 4 and sys.argv[4]:
+    r["exclusions"] = json.loads(sys.argv[4])
+open(p, "a").write(json.dumps(r, ensure_ascii=False) + "\n")
+PY
+}
+fcraw() { printf '%s\n' "$1" >> "$PM/answers.jsonl"; }
+fch() { python3 -I -c 'import sys,json;sys.path.insert(0,sys.argv[1]);sys.dont_write_bytecode=True;import pm_common as C;print(C.intent_hash(sys.argv[2],sys.argv[3],json.loads(sys.argv[4]) if len(sys.argv)>4 else []))' "$HOOKS" "$@"; }
+fcbg() { # NAME SECONDS COMMAND...: run a command in the background with stdout to $T/NAME.out, wait SECONDS before returning
+  local n=$1 w=$2; shift 2; ( "$@" > "$T/$n.out" 2>&1 ) & FCP=$!; BGPIDS="$BGPIDS $FCP"; sleep "$w"
+}
+
+# ---- FC-hash: the one identity function
+t_eq "FC-hash: sha256[:16] of the canonical JSON [outcome, done_when, sorted exclusions]; NFC; whitespace collapsed; order of exclusions irrelevant" "$(python3 -I - "$HOOKS" <<'PY'
+import sys, json, hashlib
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_common as C
+h = C.intent_hash
+ref = hashlib.sha256(json.dumps(["Ship it", "Done", ["a", "b"]], separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:16]
+print(json.dumps([h("Ship it", "Done", ["b", "a"]) == ref, len(ref) == 16, h("é", "x") == h("é", "x"), h("a   b\t\nc", "x") == h("a b c", "x"),
+                  h(" a ", "x") == h("a", "x"), h("a", "b", ["x", "y"]) == h("a", "b", ["y", "x"]), h("a", "b", ["x"]) != h("a", "b", []),
+                  h("a", "b") == h("a", "b", []), h("a", "b") != h("b", "a"), h("a", "b", [" x  y "]) == h("a", "b", ["x y"])]))
+PY
+)" '[true, true, true, true, true, true, true, true, true, true]'
+
+# ---- FC-required: intent is required on every UPDATE and FULL; the pack reserves it; the state records it
+mkrepo fc0; begin
+t_eq "FC-required: a first map's pack carries the reserved intent, empty" "$(get "$STAGE/pack.json" 'd["intent"]')" "{'accepted': None, 'proposed': None}"
+t_eq "FC-required: ... its snapshot has no intent state yet and the key component is null" "$(get "$STAGE/snapshot.json" '(d["intent"], d["key"]["intent_hash"])')" "({'accepted': None, 'proposed': None, 'target': None}, None)"
+t_eq "FC-required: ... the pack key order puts intent before every optional detail" "$(get "$STAGE/pack.json" 'list(d).index("intent") < min(list(d).index(k) for k in ("repos","commits","watch","ledger","answers","decisions","usage"))')" "True"
+rej "FC-required: a first map without intent" 'del J["intent"]' "judgement is missing: intent" full
+rej "FC-required: a FULL run needs it too: intent is not an object" 'J["intent"]="ship it"' "intent must be an object" full
+rej "FC-required: unknown key exclusions (script-owned)" 'J["intent"]["exclusions"]=["no deploy"]' "intent has unknown keys: exclusions" full
+rej "FC-required: unknown key hash" 'J["intent"]["hash"]="x"' "intent has unknown keys: hash" full
+rej "FC-required: the model cannot write accepted" 'J["intent"]["accepted"]={"outcome":"a","done_when":"b"}' "intent has unknown keys: accepted" full
+rej "FC-required: outcome over 120 bytes" 'J["intent"]["outcome"]="x"*121' "intent.outcome must be 1..120 bytes (is 121)" full
+rej "FC-required: done_when empty" 'J["intent"]["done_when"]=""' "intent.done_when must be 1..120 bytes (is 0)" full
+rej "FC-required: a secret-shaped outcome" 'J["intent"]["outcome"]="deploy with AKIAABCDEFGHIJKLMNOP"' "judgement.intent.outcome looks like it contains a secret" full
+rej "FC-required: a bidi override in done_when" 'J["intent"]["done_when"]="a‮b"' "judgement.intent.done_when contains bidirectional override" full
+jud "$INVN" full ""; eo=$(embed "$INVN")
+t_pre "FC-required: a valid intent publishes" "$eo" "PM_EMBED_OK"
+t_eq "FC-required: ... state.intent: no accepted record, the model's text is the proposal and the target, no exclusions" "$(S '(d["intent"]["accepted"], d["intent"]["proposed"]["outcome"], d["intent"]["target"]["outcome"], d["intent"]["target"]["exclusions"], d["intent"]["proposed"]["hash"] == d["intent"]["target"]["hash"])')" "(None, 'Ship the engine import', 'Ship the engine import', [], True)"
+t_eq "FC-required: ... the target's hash is the identity of its words" "$(S 'd["intent"]["target"]["hash"]')" "$(fch "$FC_O" "$FC_D" '[]')"
+t_eq "FC-required: ... judged_key.intent_hash is the target's hash" "$(S 'd["judged_key"]["intent_hash"] == d["intent"]["target"]["hash"]')" "True"
+t_eq "FC-required: ... judgement.json keeps the model's intent verbatim" "$(get "$PM/current/judgement.json" 'd["intent"]')" "{'outcome': 'Ship the engine import', 'done_when': 'The import runs on the fixture project'}"
+t_eq "FC-required: ... state.focus keeps its 3.2 meaning (phase, label, done, total, next_step)" "$(S 'sorted(d["focus"])')" "['done', 'label', 'next_step', 'phase', 'total']"
+bump; begin
+rej "FC-required: an update without intent" 'del J["intent"]' "judgement is missing: intent"
+rej "FC-required: an update with unknown intent keys" 'J["intent"]["revision"]=2' "intent has unknown keys: revision"
+t_eq "FC-required: the update's pack carries the standing proposal" "$(get "$STAGE/pack.json" 'd["intent"]')" "{'accepted': None, 'proposed': {'outcome': 'Ship the engine import', 'done_when': 'The import runs on the fixture project'}}"
+
+# ---- FC-set: the F-set line (shape, safety), the reducer, "the last one wins", never a decision answer
+mkproj fcs || true
+fcraw '{"id":"D-001","answer":"hold","exclusions":["x"],"by":"owner"}'
+fcraw '{"id":"F-set","answer":"deploy with AKIAABCDEFGHIJKLMNOP","note":"d","by":"owner"}'
+fcraw '{"id":"F-set","answer":"Outcome without a note","by":"owner"}'
+fcraw '{"id":"F-set","answer":"o","note":"d","exclusions":["a","b","c","d"],"by":"owner"}'
+python3 -c 'import json,sys;print(json.dumps({"id":"F-set","answer":"o","note":"d","exclusions":["x"*81],"by":"owner"}))' >> "$PM/answers.jsonl"
+python3 -c 'import json,sys;print(json.dumps({"id":"F-set","answer":"o"*121,"note":"d","by":"owner"}))' >> "$PM/answers.jsonl"
+fcraw '{"id":"F-set","answer":"o","note":"d","by":"claude"}'
+python3 -c 'import json,sys;print(json.dumps({"id":"F-set","answer":"o","note":"a‮b","by":"owner"}))' >> "$PM/answers.jsonl"
+fcraw '{"id":"F-set","answer":"o","note":"d","extra":1,"by":"owner"}'
+fcraw '{"id":"F-set","answer":"o","note":"d","exclusions":"oops","by":"owner"}'
+fcset "Alpha outcome" "Alpha is done" '["no deploy","no schema change"]'
+fcset "Bravo outcome" "Bravo is done"
+begin
+t_pre "FC-set: only F-set lines pending, a different identity: NEEDS_JUDGEMENT focus set by owner" "$out" "NEEDS_JUDGEMENT focus set by owner inv "
+t_eq "FC-set: the ten malformed lines are bad, the two valid ones are pending (lines 11 and 12)" "$(get "$STAGE/snapshot.json" '([b["line"] for b in d["answers"]["bad"]], [(a["id"], a["line"]) for a in d["answers"]["pending"]])')" "([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [('F-set', 11), ('F-set', 12)])"
+t_eq "FC-set: exclusions on a D- line: unknown keys" "$(get "$STAGE/snapshot.json" 'd["answers"]["bad"][0]["why"]')" "unknown keys: exclusions"
+t_eq "FC-set: a secret-shaped outcome is bad, never stored" "$(get "$STAGE/snapshot.json" 'd["answers"]["bad"][1]["why"]')" "F-set text holds control characters or looks like a secret"
+t_eq "FC-set: a missing note is bad" "$(get "$STAGE/snapshot.json" 'd["answers"]["bad"][2]["why"]')" "F-set note (done when) must be a string of 1..120 bytes"
+t_eq "FC-set: four exclusions are bad" "$(get "$STAGE/snapshot.json" 'd["answers"]["bad"][3]["why"]')" "F-set exclusions must be at most 3 strings of 1..80 bytes"
+t_eq "FC-set: ... so is one over 80 bytes, an outcome over 120, by claude, a bidi character, an extra key, a non-list" "$(get "$STAGE/snapshot.json" '[b["why"][:24] for b in d["answers"]["bad"][4:]]')" "['F-set exclusions must be', 'F-set answer (the outcom', 'by must be \"owner\"', 'F-set text holds control', 'unknown keys: extra', 'F-set exclusions must be']"
+t_eq "FC-set: the staged snapshot's intent: accepted is the LAST F-set line (line 12, no exclusions), hash = the identity of its words" "$(get "$STAGE/snapshot.json" '(d["intent"]["accepted"]["outcome"], d["intent"]["accepted"]["line"], d["intent"]["accepted"]["exclusions"], d["intent"]["accepted"]["hash"], d["intent"]["accepted"]["at"])')" "('Bravo outcome', 12, [], '$(fch "Bravo outcome" "Bravo is done" '[]')', '2026-10-11T10:00:00+03:00')"
+t_eq "FC-set: ... the key component is the accepted hash" "$(get "$STAGE/snapshot.json" 'd["key"]["intent_hash"] == d["intent"]["accepted"]["hash"]')" "True"
+t_eq "FC-set: ... an F-set line is never a decision answer: D-001 is still open, nothing 'unknown or closed decision F-set'" "$(get "$STAGE/snapshot.json" '([x["status"] for x in d["decisions"]], [b["why"] for b in d["answers"]["bad"] if "F-set" in b["why"] and "unknown or closed" in b["why"]])')" "(['open', 'open'], [])"
+t_eq "FC-set: ... the pack shows the accepted record (words and exclusions only)" "$(get "$STAGE/pack.json" 'd["intent"]["accepted"]')" "{'outcome': 'Bravo outcome', 'done_when': 'Bravo is done', 'exclusions': []}"
+pub ''
+t_pre "FC-set: the judgement publishes (the model copied the accepted words)" "$eo" "PM_EMBED_OK"
+t_eq "FC-set: ... accepted is Bravo with its line, proposed is null (the model said what the record says), target = accepted" "$(S '(d["intent"]["accepted"]["outcome"], d["intent"]["accepted"]["line"], d["intent"]["proposed"], d["intent"]["target"]["hash"] == d["intent"]["accepted"]["hash"], d["judged_key"]["intent_hash"] == d["intent"]["accepted"]["hash"])')" "('Bravo outcome', 12, None, True, True)"
+t_eq "FC-set: ... all twelve lines are consumed (applied 12), the bad ones recorded" "$(S '(d["answers"]["applied"], d["answers"]["total"], d["answers"]["bad"])')" "(12, 12, [1, 2, 3, 4, 5])"
+t_eq "FC-set: ... the next facts run is quiet: accepted == target, nothing moved" "$(facts)" "NO_CHANGE nothing moved"
+t_not "FC-set: ... and the assurance does not say the focus changed" "$(S 'd["assurance"]["why"]')" "focus changed"
+
+# ---- FC-proposed / FC-ab: a different model text is only a suggestion; the operative intention stays the owner's
+mkproj fcp || true
+fcset "$FC_O" "$FC_D" '["no deploy"]'
+begin; t_pre "FC-proposed: setup: the proposal's words with new exclusions are another identity: judged" "$out" "NEEDS_JUDGEMENT focus set by owner inv "
+pub ''
+t_eq "FC-proposed: model text == accepted words (the record has exclusions the model cannot set): no proposed; target keeps the exclusions" "$(S '(d["intent"]["accepted"]["exclusions"], d["intent"]["proposed"], d["intent"]["target"]["exclusions"])')" "(['no deploy'], None, ['no deploy'])"
+bump; begin >/dev/null
+t_eq "FC-proposed: ... the next pack carries accepted with its exclusions and no proposed" "$(get "$STAGE/pack.json" 'd["intent"]')" "{'accepted': {'outcome': 'Ship the engine import', 'done_when': 'The import runs on the fixture project', 'exclusions': ['no deploy']}, 'proposed': None}"
+pub 'J["intent"]={"outcome":"Rewrite the importer","done_when":"All fixtures pass"}'
+t_pre "FC-proposed: a model text that differs from accepted publishes" "$eo" "PM_EMBED_OK"
+t_eq "FC-proposed: ... accepted is unchanged, the model's text is published as proposed, the target is still the accepted record" "$(S '(d["intent"]["accepted"]["outcome"], d["intent"]["proposed"]["outcome"], d["intent"]["target"]["outcome"], d["intent"]["target"]["exclusions"], d["intent"]["target"]["hash"] == d["intent"]["accepted"]["hash"])')" "('Ship the engine import', 'Rewrite the importer', 'Ship the engine import', ['no deploy'], True)"
+t_eq "FC-proposed: ... proposed.hash is the identity of the F-set that would confirm it (the accepted exclusions kept)" "$(S 'd["intent"]["proposed"]["hash"]')" "$(fch "Rewrite the importer" "All fixtures pass" '["no deploy"]')"
+t_eq "FC-proposed: ... the map is complete: the assurance has no focus reason" "$(S 'd["assurance"]["why"]')" "[]"
+t_has "FC-proposed: the brief shows the accepted focus as confirmed, not the proposal" "$(cat "$PM/brief.txt")" "focus: Ship the engine import (confirmed)"
+t_not "FC-proposed: ... and never the proposal" "$(cat "$PM/brief.txt")" "Rewrite the importer"
+t_has "FC-proposed: the handoff serves the accepted focus and its exclusions" "$(cat "$PM/handoff.txt")" "Not in scope (owner): no deploy"
+bump; begin >/dev/null
+t_eq "FC-proposed: the next pack carries both: the owner's record and the standing suggestion" "$(get "$STAGE/pack.json" 'd["intent"]')" "{'accepted': {'outcome': 'Ship the engine import', 'done_when': 'The import runs on the fixture project', 'exclusions': ['no deploy']}, 'proposed': {'outcome': 'Rewrite the importer', 'done_when': 'All fixtures pass'}}"
+pub 'J["intent"]={"outcome":"Rewrite the importer","done_when":"All fixtures pass"}'
+# FC-ab: accepted A, proposed B, the owner confirms B: a different identity than the served intention: never model-free
+fcset "Rewrite the importer" "All fixtures pass" '["no deploy"]'
+out=$(facts)
+t_pre "FC-ab: accepted A, proposed B, F-set B (with the exclusions) -> NEEDS_JUDGEMENT focus set by owner, never model-free" "$out" "NEEDS_JUDGEMENT focus set by owner inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FC-ab: ... nothing was consumed by the refresh that flagged the map (applied still 1, A still accepted)" "$(S '(d["answers"]["applied"], d["intent"]["accepted"]["outcome"])')" "(1, 'Ship the engine import')"
+t_eq "FC-ab: ... the staged snapshot shows B as the accepted record, the proposal reconciled away, the F-set pending" "$(get "$STAGE/snapshot.json" '(d["intent"]["accepted"]["outcome"], d["intent"]["proposed"], [a["id"] for a in d["answers"]["pending"]])')" "('Rewrite the importer', None, ['F-set'])"
+pub ''
+t_eq "FC-ab: ... after the judgement B is the accepted record and the target, applied 2" "$(S '(d["intent"]["accepted"]["outcome"], d["intent"]["target"]["outcome"], d["intent"]["proposed"], d["answers"]["applied"], d["judged_key"]["intent_hash"] == d["intent"]["accepted"]["hash"])')" "('Rewrite the importer', 'Rewrite the importer', None, 2, True)"
+
+# ---- FC-confirm-mech / FC-first-confirm: the owner confirms exactly the proposal: no model, nothing staged, nothing re-judged
+mkproj fcc || true
+G0=$(gen); N0=$(ndirs); JK0=$(S 'json.dumps([d["judged_key"]["intent_hash"], d["judged_at"], d["since"], d["judged_seen"]], sort_keys=True)')
+fcset "$FC_O" "$FC_D"
+LH=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PM/answers.jsonl")
+out=$(facts); rc=$?
+t_eq "FC-confirm-mech: a proposal-only map + the F-set that confirms it -> NEEDS_REFRESH focus confirmed (no inv)" "$rc:$out" "0:NEEDS_REFRESH focus confirmed"
+t_eq "FC-confirm-mech: ... no staging dir was created" "$(ndirs)" "$N0"
+t_true "FC-confirm-mech: ... one new generation was published" "[ \"\$(gen)\" != \"$G0\" ] && [ \"\$(ngens)\" = 2 ]"
+t_eq "FC-confirm-mech: ... accepted is the owner's record (line 1, its time), proposed is gone, target unchanged" "$(S '(d["intent"]["accepted"]["outcome"], d["intent"]["accepted"]["line"], d["intent"]["accepted"]["at"], d["intent"]["proposed"], d["intent"]["target"]["outcome"], d["intent"]["accepted"]["hash"] == d["intent"]["target"]["hash"])')" "('Ship the engine import', 1, '2026-10-11T10:00:00+03:00', None, 'Ship the engine import', True)"
+t_eq "FC-confirm-mech: ... applied advanced through exactly the line; the prefix hash verifies against the file" "$(S '(d["answers"]["applied"], d["answers"]["total"], d["answers"]["applied_hash"] == "'"$LH"'")')" "(1, 1, True)"
+t_eq "FC-confirm-mech: ... the judged key took the new count; intent_hash, the assessment, since and judged_seen are untouched" "$(S 'json.dumps([d["judged_key"]["intent_hash"], d["judged_at"], d["since"], d["judged_seen"]], sort_keys=True)')" "$JK0"
+t_eq "FC-confirm-mech: ... answers_count in the key is 1 and the map is not stale" "$(S '(d["judged_key"]["answers_count"], d["stale"])')" "(1, None)"
+t_has "FC-confirm-mech: ... the brief now says confirmed" "$(cat "$PM/brief.txt")" "focus: Ship the engine import (confirmed)"
+t_has "FC-confirm-mech: ... and the handoff names the date" "$(cat "$PM/handoff.txt")" "Focus (confirmed 2026-10-11): Ship the engine import"
+t_eq "FC-confirm-mech: ... the new generation's snapshot agrees with the state: applied 1, nothing pending" "$(get "$PM/current/snapshot.json" '(d["answers"]["applied"], d["answers"]["pending"], d["intent"]["accepted"]["line"])')" "(1, [], 1)"
+t_eq "FC-confirm-mech: ... answers.jsonl was not touched" "$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PM/answers.jsonl")" "$LH"
+t_eq "FC-confirm-mech: the next run is NO_CHANGE (first confirm: intent_hash unchanged, nothing pending)" "$(facts)" "NO_CHANGE nothing moved"
+t_eq "FC-first-confirm: ... and the one after it too, with no new generation" "$(facts; ngens)" "NO_CHANGE nothing moved
+2"
+# a later judgement keeps the owner's record exactly once
+upd ''
+t_eq "FC-no-double: a later judgement keeps the same record (line 1) and applied stays 1" "$(S '(d["intent"]["accepted"]["line"], d["answers"]["applied"], d["intent"]["proposed"])')" "(1, 1, None)"
+
+# ---- FC-confirm-exclusions: the identity includes the exclusions
+mkproj fcx || true
+fcset "$FC_O" "$FC_D" '["no deploy","no schema change"]'
+begin; t_pre "FC-confirm-exclusions: setup: an accepted record with exclusions is a new identity: judged" "$out" "NEEDS_JUDGEMENT focus set by owner inv "
+pub ''
+fcset "$FC_O" "  The   import runs on the fixture project " '["no schema change","no deploy"]'
+t_eq "FC-confirm-exclusions: the same words (whitespace and exclusion order aside) confirm the served intention: model-free" "$(facts)" "NEEDS_REFRESH focus confirmed"
+t_eq "FC-confirm-exclusions: ... the exclusions are kept, the record is the NEW line (2)" "$(S '(d["intent"]["accepted"]["exclusions"], d["intent"]["accepted"]["line"], d["answers"]["applied"])')" "(['no schema change', 'no deploy'], 2, 2)"
+fcset "$FC_O" "$FC_D"
+out=$(facts)
+t_pre "FC-confirm-exclusions: a confirmation that DROPS the exclusions is another identity: NEEDS_JUDGEMENT" "$out" "NEEDS_JUDGEMENT focus set by owner inv "
+t_eq "FC-confirm-exclusions: ... nothing was applied by the flagging refresh (applied 2, exclusions kept in the state)" "$(S '(d["answers"]["applied"], d["intent"]["accepted"]["exclusions"])')" "(2, ['no schema change', 'no deploy'])"
+mkproj fcx2 || true
+fcset "$FC_O" "$FC_D" '["no deploy"]'; begin; pub ''
+fcset "$FC_O" "$FC_D" '["no deploy","no schema change"]'
+t_pre "FC-confirm-exclusions: ... and one that ADDS an exclusion too" "$(facts)" "NEEDS_JUDGEMENT focus set by owner inv "
+
+# ---- FC-gate: embed re-validates the whole predicate under its lock on ITS image of answers.jsonl (a gated append)
+# (a) a D- line appended after facts collected and before the refresh read the file
+mkproj fcg1 || true; fcset "$FC_O" "$FC_D"; G0=$(gen)
+fcbg fcg1 1 env PM_FACTS_DELAY_AFTER=2 python3 "$HOOKS/project-map-facts.py" "$R"
+printf '{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"; wait $FCP
+out=$(cat "$T/fcg1.out")
+t_pre "FC-gate: a D- line appended meanwhile: the refresh declines, facts re-collects and stages the judgement" "$out" "NEEDS_JUDGEMENT 2 pending answers inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_true "FC-gate: ... the decline still published a refresh, and the staging is based on THAT generation" "[ \"\$(gen)\" != \"$G0\" ] && [ \"\$(get $STAGE/invocation.json 'd[\"base\"]')\" = \"\$(gen)\" ]"
+t_eq "FC-gate: ... nothing was consumed: applied 0, accepted null" "$(S '(d["answers"]["applied"], d["intent"]["accepted"])')" "(0, None)"
+t_eq "FC-gate: ... the staged snapshot carries the line that declined the path AND the new one, both pending" "$(get "$STAGE/snapshot.json" '[a["id"] for a in d["answers"]["pending"]]')" "['F-set', 'D-001']"
+t_eq "FC-gate: ... so does the pack the model reads" "$(get "$STAGE/pack.json" '[a["id"] for a in d["answers"]["pending"]]')" "['F-set', 'D-001']"
+pub ''
+t_eq "FC-gate: ... the judgement consumes both lines: D-001 answered, the focus confirmed, applied 2" "$(S '([(x["id"], x["status"]) for x in d["decisions"] if x["id"]=="D-001"], d["intent"]["accepted"]["line"], d["answers"]["applied"])')" "([('D-001', 'answered')], 1, 2)"
+# (b) a DIFFERENT F-set appended meanwhile
+mkproj fcg2 || true; fcset "$FC_O" "$FC_D"
+fcbg fcg2 1 env PM_FACTS_DELAY_AFTER=2 python3 "$HOOKS/project-map-facts.py" "$R"
+fcset "Other outcome" "Other done"; wait $FCP
+t_pre "FC-gate: a different F-set appended meanwhile: NEEDS_JUDGEMENT focus set by owner" "$(cat "$T/fcg2.out")" "NEEDS_JUDGEMENT focus set by owner inv "
+t_eq "FC-gate: ... the refresh applied nothing" "$(S '(d["answers"]["applied"], d["intent"]["accepted"])')" "(0, None)"
+# (c) a bad line appended meanwhile
+mkproj fcg3 || true; fcset "$FC_O" "$FC_D"
+fcbg fcg3 1 env PM_FACTS_DELAY_AFTER=2 python3 "$HOOKS/project-map-facts.py" "$R"
+printf 'this is not json\n' >> "$PM/answers.jsonl"; wait $FCP
+out=$(cat "$T/fcg3.out")
+t_pre "FC-gate: a bad line appended meanwhile: the fast path is declined (a bad line is no confirmation)" "$out" "NEEDS_JUDGEMENT 1 pending answers inv "
+INV=${out##* }; STAGE="$PM/inv-$INV"
+t_eq "FC-gate: ... the staged snapshot reports the bad line and keeps the F-set pending" "$(get "$STAGE/snapshot.json" '([b["line"] for b in d["answers"]["bad"]], [a["id"] for a in d["answers"]["pending"]])')" "([2], ['F-set'])"
+# (d) `current` moved while the refresh was in flight: SUPERSEDED, nothing consumed
+mkproj fcg4 || true; upd ''; fcset "$FC_O" "$FC_D"
+OLDG=$(ls -d "$PM"/gen-0000* | head -1 | xargs basename); AL=$(cat "$PM/answers.jsonl")
+fcbg fcg4 1.5 env PM_EMBED_PAUSE_BEFORE_PUBLISH=3 python3 "$HOOKS/project-map-facts.py" "$R"
+python3 -c "import os,sys;os.symlink(sys.argv[2],sys.argv[1]+'/current.mv');os.rename(sys.argv[1]+'/current.mv',sys.argv[1]+'/current')" "$PM" "$OLDG"; wait $FCP
+t_pre "FC-gate: current moved during the --apply-answers refresh: REFRESH_FAILED SUPERSEDED" "$(cat "$T/fcg4.out")" "REFRESH_FAILED SUPERSEDED base "
+t_eq "FC-gate: ... nothing was consumed (the line is still pending, the record is not accepted, current is where the other writer put it)" "$(S '(d["answers"]["applied"], d["intent"]["accepted"])'):$(cur):$([ "$(cat "$PM/answers.jsonl")" = "$AL" ] && echo same)" "(0, None):$OLDG:same"
+# (e) out of budget
+mkproj fcg5 || true; fcset "$FC_O" "$FC_D"
+out=$(PM_FACTS_DELAY_AFTER=1 facts --budget 1.6)
+t_eq "FC-gate: no budget left for the refresh: NEEDS_REFRESH focus confirmed (deferred: budget), nothing applied" "$out:$(S 'd["answers"]["applied"]')" "NEEDS_REFRESH focus confirmed (deferred: budget):0"
+mkproj fcg6 || true; fcset "$FC_O" "$FC_D"; N0=$(ndirs)
+fcbg fcg6 1 env PM_FACTS_DELAY_AFTER=1.5 PM_FACTS_DELAY_AFTER_REFRESH=4 python3 "$HOOKS/project-map-facts.py" "$R" --budget 5
+printf '{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"; wait $FCP
+out=$(cat "$T/fcg6.out")
+t_eq "FC-gate: the refresh declined and the budget cannot afford a second collection: deferred, no staging" "$out:$(ndirs)" "NEEDS_JUDGEMENT 1 pending answers (deferred: budget):$N0"
+t_eq "FC-gate: ... still nothing consumed" "$(S '(d["answers"]["applied"], d["intent"]["accepted"])')" "(0, None)"
+# (g) the predicate inside embed, called directly (the same function facts uses, evaluated on embed's own image)
+mkproj fcg7 || true; fcset "$FC_O" "$FC_D"; printf '{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+eo=$(embed --mechanical --apply-answers)
+t_pre "FC-gate: embed alone, a D- line next to the F-set: the refresh publishes" "$eo" "PM_EMBED_OK"
+t_has "FC-gate: ... but applies nothing and says why, after PM_EMBED_OK" "$eo" "PM_EMBED_NOTE answers not applied: the new lines are not a plain confirmation of the focus"
+t_eq "FC-gate: ... both lines stay pending (applied 0, accepted null)" "$(S '(d["answers"]["applied"], d["intent"]["accepted"])')" "(0, None)"
+mkproj fcg8 || true; fcset "$FC_O" "$FC_D"; printf '{"id":"F-set","answer":"half a lin' >> "$PM/answers.jsonl"
+eo=$(embed --mechanical --apply-answers)
+t_has "FC-gate: embed alone, an unfinished last line: never applied" "$eo" "PM_EMBED_NOTE answers not applied: answers.jsonl has an uncommitted last line"
+t_eq "FC-gate: ... nothing consumed" "$(S 'd["answers"]["applied"]')" "0"
+mkproj fcg9 || true; fcset "$FC_O" "$FC_D"; bump
+eo=$(embed --mechanical --apply-answers)
+t_has "FC-gate: embed alone, the project moved too (a watched file changed): not applied, the reason names what moved" "$eo" "PM_EMBED_NOTE answers not applied: other facts moved: "
+t_eq "FC-gate: ... nothing consumed, and the map is flagged stale by the same refresh" "$(S '(d["answers"]["applied"], d["stale"] is not None)')" "(0, True)"
+mkproj fcg10 || true; fcset "$FC_O" "$FC_D"
+eo=$(embed --mechanical --apply-answers)
+t_pre "FC-gate: embed alone, a plain confirmation: applied without a note" "$eo" "PM_EMBED_OK"
+t_not "FC-gate: ... no PM_EMBED_NOTE" "$eo" "PM_EMBED_NOTE"
+t_eq "FC-gate: ... applied 1, accepted line 1, no stale flag" "$(S '(d["answers"]["applied"], d["intent"]["accepted"]["line"], d["stale"])')" "(1, 1, None)"
+# (f) --apply-answers is for the mechanical mode only
+out=$(bash "$HOOKS/project-map-embed.sh" "$R" inv-00000000 --apply-answers); t_pre "FC-gate: --apply-answers without --mechanical is a usage error" "$out" "PM_EMBED_ERROR usage:"
+
+# ---- FC-new-judged: a different intention costs one judgement and then stands
+mkproj fcn || true
+fcset "Collect the benchmark numbers" "Three runs are recorded" '["no new models"]'
+out=$(facts); t_pre "FC-new-judged: a new intention: NEEDS_JUDGEMENT focus set by owner" "$out" "NEEDS_JUDGEMENT focus set by owner inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FC-new-judged: ... the pack the model reads shows it as the owner's objective" "$(get "$STAGE/pack.json" 'd["intent"]["accepted"]')" "{'outcome': 'Collect the benchmark numbers', 'done_when': 'Three runs are recorded', 'exclusions': ['no new models']}"
+pub ''
+t_eq "FC-new-judged: ... published: accepted = target, intent_hash rebased to the new identity, applied 1" "$(S '(d["intent"]["accepted"]["hash"] == d["intent"]["target"]["hash"] == d["judged_key"]["intent_hash"], d["intent"]["accepted"]["exclusions"], d["answers"]["applied"])')" "(True, ['no new models'], 1)"
+t_eq "FC-new-judged: ... and the next run is quiet" "$(facts)" "NO_CHANGE nothing moved"
+t_eq "FC-new-judged: ... the assurance has no focus reason" "$(S '[w for w in d["assurance"]["why"] if "focus" in w]')" "[]"
+
+# ---- FC-mixed: an F-set with a decision answer is never model-free
+mkproj fcm || true
+fcset "$FC_O" "$FC_D"; printf '{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+out=$(facts)
+t_pre "FC-mixed: an F-set that confirms the target + a D- answer: NEEDS_JUDGEMENT (2 pending answers)" "$out" "NEEDS_JUDGEMENT 2 pending answers inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FC-mixed: ... the flagging refresh applied nothing (applied 0, accepted null)" "$(S '(d["answers"]["applied"], d["intent"]["accepted"])')" "(0, None)"
+t_eq "FC-mixed: ... the staged snapshot has both lines pending, D-001 answered by the lifecycle, the focus accepted" "$(get "$STAGE/snapshot.json" '([a["id"] for a in d["answers"]["pending"]], [x["status"] for x in d["decisions"] if x["id"]=="D-001"], d["intent"]["accepted"]["line"])')" "(['F-set', 'D-001'], ['answered'], 1)"
+pub ''
+t_eq "FC-mixed: ... the judgement consumes both (applied 2)" "$(S '(d["answers"]["applied"], d["intent"]["accepted"]["line"], [x["status"] for x in d["decisions"] if x["id"]=="D-001"])')" "(2, 1, ['answered'])"
+# a decision answer BEFORE the F-set in the file: the F-set line is still not a decision answer, D- keeps its meaning
+mkproj fcm2 || true
+printf '{"id":"D-002","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"; fcset "$FC_O" "$FC_D"
+out=$(facts); t_pre "FC-mixed: a D- line first, then the F-set: not model-free either" "$out" "NEEDS_JUDGEMENT 2 pending answers inv "
+
+# ---- FC-late: publication re-reads answers.jsonl; every appended line goes through the shared reducer
+ovtail() { mkproj "$1" "$(ovraise "$RW_TP,$RW_SY")" || true; ovpush "$1"; bump; begin; }
+ovtail fcl1
+jud "$INVN" update 'J["decisions"][1]["overtaken"]={"why":"Owner tagged v1.0.0 and pushed by hand"}'   # D-001 stays not ready: nothing needs the owner
+fcset "Other outcome" "Other done"; printf '{"id":"D-002","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+eo=$(embed "$INVN")
+t_has "FC-late: an F-set then a winning D- answer arrive while a closure by events is judged: the answer wins" "$eo" "PM_EMBED_NOTE owner answer for D-002"
+t_eq "FC-late: ... both lines were reduced: D-002 answered, the F-set is the accepted record (line 1), applied 2 of 2" "$(S '([x["status"] for x in d["decisions"] if x["id"]=="D-002"], d["intent"]["accepted"]["outcome"], d["intent"]["accepted"]["line"], d["answers"]["applied"], d["answers"]["total"])')" "(['answered'], 'Other outcome', 1, 2, 2)"
+t_eq "FC-late: ... the target is the STAGED intention (the model's text), not the late record: they differ" "$(S '(d["intent"]["target"]["outcome"], d["intent"]["accepted"]["hash"] != d["intent"]["target"]["hash"], d["judged_key"]["intent_hash"] == d["intent"]["target"]["hash"])')" "('Ship the engine import', True, True)"
+t_eq "FC-late: ... so the assurance says the focus changed after the assessment (and a decision is not open)" "$(S '(d["assurance"]["ok"], [w for w in d["assurance"]["why"] if "focus" in w])')" "(False, ['focus changed after the assessment'])"
+t_has "FC-late: ... and line 2 of the brief says so" "$(sed -n 2p "$PM/brief.txt")" "focus changed after the assessment"
+t_has "FC-late: ... and so does line 2 of the handoff" "$(sed -n 2p "$PM/handoff.txt")" "focus changed after the assessment"
+out=$(facts)
+t_pre "FC-late: ... the next facts run re-judges" "$out" "NEEDS_JUDGEMENT focus set by owner"
+# an F-set ALONE during a closing judgement is not a late answer: the closure proceeds, the line stays pending
+ovtail fcl2
+jud "$INVN" update "$(ovj '')"
+fcset "$FC_O" "$FC_D"
+eo=$(embed "$INVN")
+t_pre "FC-late: an F-set alone: the closure by events proceeds" "$eo" "PM_EMBED_OK"
+t_not "FC-late: ... without a note" "$eo" "PM_EMBED_NOTE"
+t_eq "FC-late: ... D-002 overtaken, the line stays pending (applied 0, accepted null)" "$(S '([x["status"] for x in d["decisions"] if x["id"]=="D-002"], d["answers"]["applied"], d["intent"]["accepted"])')" "(['overtaken'], 0, None)"
+out=$(facts)
+t_eq "FC-late: ... and it is a plain confirmation of the target: the next run applies it without a model" "$out" "NEEDS_REFRESH focus confirmed"
+t_eq "FC-late: ... applied 1 and the record is accepted" "$(S '(d["answers"]["applied"], d["intent"]["accepted"]["line"])')" "(1, 1)"
+
+# ---- FC-no-double: a line is consumed exactly once, whichever path consumes it; the staging refresh never applies it
+mkproj fcd || true
+fcset "$FC_O" "$FC_D"; out=$(facts)
+t_eq "FC-no-double: setup: the confirmation is applied" "$out" "NEEDS_REFRESH focus confirmed"
+A1=$(S 'json.dumps(d["intent"], sort_keys=True)'); H1=$(S 'd["answers"]["applied_hash"]'); G1=$(gen)
+eo=$(embed --mechanical --apply-answers)
+t_pre "FC-no-double: a second --apply-answers finds nothing after applied: ordinary refresh" "$eo" "PM_EMBED_OK"
+t_has "FC-no-double: ... with the note that nothing was applied" "$eo" "PM_EMBED_NOTE answers not applied: no new answer lines"
+t_eq "FC-no-double: ... the record, applied and its hash are exactly what they were" "$(S 'json.dumps(d["intent"], sort_keys=True)'):$(S 'd["answers"]["applied_hash"]')" "$A1:$H1"
+# the refresh inside NEEDS_JUDGEMENT never applies a line: a staged snapshot carries it as pending
+fcset "$FC_O" "$FC_D"; bump; out=$(facts)
+t_pre "FC-no-double: a confirming F-set + a repository change: NEEDS_JUDGEMENT (the F-set cannot go model-free next to other news)" "$out" "NEEDS_JUDGEMENT "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FC-no-double: ... the stale-stamping refresh did NOT apply the line (applied still 1)" "$(S '(d["answers"]["applied"], d["intent"]["accepted"]["line"], d["stale"] is not None)')" "(1, 1, True)"
+t_eq "FC-no-double: ... the staged snapshot carries it as pending, and accepted is the new record (line 2)" "$(get "$STAGE/snapshot.json" '([a["id"] for a in d["answers"]["pending"]], d["intent"]["accepted"]["line"], d["answers"]["applied"])')" "(['F-set'], 2, 1)"
+pub ''
+t_eq "FC-no-double: ... the judgement consumes it once: applied 2, accepted line 2" "$(S '(d["answers"]["applied"], d["intent"]["accepted"]["line"])')" "(2, 2)"
+
+# ---- FC-replay: --accept-answers replays the whole file through the one reducer
+mkproj fcr || true
+fcset "Alpha outcome" "Alpha is done"; printf '{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+fcset "Bravo outcome" "Bravo is done" '["no deploy"]'; printf '{"id":"D-002","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+bump; begin; pub ''
+t_eq "FC-replay: setup: two F-set lines with D- answers between: the last F-set is accepted (line 3), applied 4" "$(S '(d["intent"]["accepted"]["outcome"], d["intent"]["accepted"]["line"], d["answers"]["applied"])')" "('Bravo outcome', 3, 4)"
+grep -v '"F-set"' "$PM/answers.jsonl" > "$T/fcr.tmp"; cat "$T/fcr.tmp" > "$PM/answers.jsonl"
+out=$(facts); t_pre "FC-replay: the owner removed every F-set line: ERROR answers rewritten" "$out" "ERROR answers rewritten"
+out=$(python3 "$HOOKS/project-map-facts.py" --accept-answers "$R"); rc=$?
+t_has "FC-replay: --accept-answers says the focus is gone" "$out" "focus after the replay: none (no F-set line)"
+t_eq "FC-replay: ... the override in cache.json records accepted null next to applied 0" "$(get "$PM/cache.json" '(d["answers_accept"]["applied"], d["answers_accept"]["accepted"])')" "(0, None)"
+bump; begin
+t_eq "FC-replay: the next staged snapshot has no accepted record; the pack either" "$(get "$STAGE/snapshot.json" 'd["intent"]["accepted"]'):$(get "$STAGE/pack.json" 'd["intent"]["accepted"]')" "None:None"
+pub 'J["decisions"]=[]'
+t_eq "FC-replay: after the judgement the accepted focus is gone (null) and the model's text is the proposal; the replayed D- lines are consumed" "$(S '(d["intent"]["accepted"], d["intent"]["proposed"]["outcome"], d["answers"]["applied"])')" "(None, 'Ship the engine import', 2)"
+# a replay with two F-set lines and D- lines between: the LAST F-set line, whatever the published state said
+mkproj fcr2 || true
+fcset "Alpha outcome" "Alpha is done"; printf '{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+fcset "Bravo outcome" "Bravo is done" '["no deploy"]'; printf '{"id":"D-002","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+out=$(python3 "$HOOKS/project-map-facts.py" --accept-answers "$R")
+t_has "FC-replay: a replay of two F-set lines names the last one" "$out" 'focus after the replay: "Bravo outcome" (line 3)'
+t_eq "FC-replay: ... stored with its exclusions and line" "$(get "$PM/cache.json" '(d["answers_accept"]["accepted"]["outcome"], d["answers_accept"]["accepted"]["exclusions"], d["answers_accept"]["accepted"]["line"])')" "('Bravo outcome', ['no deploy'], 3)"
+bump; begin
+t_eq "FC-replay: ... and the staged snapshot starts from it (accepted = Bravo, line 3)" "$(get "$STAGE/snapshot.json" '(d["intent"]["accepted"]["outcome"], d["intent"]["accepted"]["line"], d["answers"]["applied"])')" "('Bravo outcome', 3, 0)"
+pub ''
+t_eq "FC-replay: ... the published record is Bravo with its exclusions" "$(S '(d["intent"]["accepted"]["outcome"], d["intent"]["accepted"]["exclusions"], d["answers"]["applied"])')" "('Bravo outcome', ['no deploy'], 4)"
+
+# ---- FC-handoff: handoff.txt in every generation: signed, linked, bounded, the decision never denied
+RDY2='J["decisions"][1]["ready"]=True'
+mkproj fch "$RDY2" || true
+fcset "$FC_O" "$FC_D" '["no deploy","no schema change"]'; bump; begin; pub "$RDY2"
+t_pre "FC-handoff: setup: a map with a ready decision and an accepted focus with exclusions" "$eo" "PM_EMBED_OK"
+t_eq "FC-handoff: handoff.txt is listed in the signed manifest with size and sha256, and the generation verifies" "$(get "$PM/current/manifest.json" '"handoff.txt" in d["files"] and sorted(d["files"]["handoff.txt"]) == ["sha256","size"] and "handoff.txt" in json.load(open("'"$PM"'/current/state.json"))["generation_files"]'):$(python3 -c "import sys;sys.path.insert(0,'$HOOKS');import pm_common as C;print(C.verify_generation('$PM/gen-$(gen)'))")" "True:True"
+t_eq "FC-handoff: the fifth stable symlink points into current/" "$(readlink "$PM/handoff.txt")" "current/handoff.txt"
+t_true "FC-handoff: <= 1500 bytes including the final newline" "[ \$(wc -c < $PM/handoff.txt) -le 1500 ] && [ \"\$(tail -c 1 $PM/handoff.txt | od -An -c | tr -d ' ')\" = '\\n' ]"
+t_eq "FC-handoff: state.handoff is the same text (the page prints it, no second renderer)" "$(S 'd["handoff"] == open("'"$PM"'/current/handoff.txt", encoding="utf-8").read()')" "True"
+HF=$(cat "$PM/handoff.txt")
+t_pre "FC-handoff: line 1 is 'Handoff · <name> · as of <minute> · assessed <minute>'" "$(sed -n 1p "$PM/handoff.txt")" "Handoff · demo-app · as of 20"
+t_pre "FC-handoff: line 2 names the decision that needs the owner (never a denial)" "$(sed -n 2p "$PM/handoff.txt")" "Status: Needs you: D-002 Post another status comment on #12?"
+t_eq "FC-handoff: lines 3 to 5: the confirmed focus with its date, what done means, the owner's exclusions" "$(sed -n 3,5p "$PM/handoff.txt")" "Focus (confirmed 2026-10-11): Ship the engine import
+Done when: The import runs on the fixture project
+Not in scope (owner): no deploy; no schema change"
+t_has "FC-handoff: where it stands, since, next, the decisions, the risk, the evidence" "$HF" "Where it stands: "
+t_has "FC-handoff: ... since" "$HF" "Since 20"
+t_has "FC-handoff: ... next" "$HF" "Next: Finish the cycle-2 diagnosis report (claude): "
+t_has "FC-handoff: ... every ready open decision, with its default" "$HF" "Needs the owner: D-002 Post another status comment on #12? (default hold)"
+t_has "FC-handoff: ... the highest-severity risk" "$HF" "Open risk: R-1 Router bounds"
+t_has "FC-handoff: ... the local git evidence" "$HF" "Evidence: git: "
+t_eq "FC-handoff: the last line is the standing reminder: context, not permission" "$(tail -n 1 "$PM/handoff.txt")" "Context only, not permission: no push, delete, spend, deploy or infrastructure change without the owner."
+# a stale map with an open decision still names it (Q8): the handoff never denies a known decision
+echo x > "$R/fc-scratch.txt"; facts >/dev/null
+t_eq "FC-handoff: the map is stale (flagged by the refresh) and the decision is still named on line 2, never 'Nothing needs you'" "$(S 'd["stale"] is not None'):$(sed -n 2p "$PM/handoff.txt" | cut -c1-30)" "True:Status: Needs you: D-002 Post "
+rm -f "$R/fc-scratch.txt"
+# tampering with the file is caught by the signature like any other generation file
+echo tamper >> "$PM/gen-$(gen)/handoff.txt"
+t_eq "FC-handoff: an edited handoff.txt makes the generation unverified" "$(python3 -c "import sys;sys.path.insert(0,'$HOOKS');import pm_common as C;print(C.verify_generation('$PM/gen-$(gen)'))")" "False"
+# markup-looking text stays text
+mkproj fch2 "$RDY2" || true
+bump; begin; pub 'J["intent"]={"outcome":"<script>alert(1)</script> & <b>ship</b>","done_when":"<img src=x onerror=alert(1)>"}'
+t_pre "FC-handoff: markup-looking intent publishes" "$eo" "PM_EMBED_OK"
+t_has "FC-handoff: ... verbatim in the plain-text file" "$(cat "$PM/handoff.txt")" "Focus (proposed, not confirmed): <script>alert(1)</script> & <b>ship</b>"
+t_eq "FC-handoff: ... and never raw inside the page's state blob (escaped like all state)" "$(grep -c '<script>alert(1)' "$PM/index.html")" "0"
+# unit: the drop order is exact (a cap sweep), the never-dropped lines survive any cap, line 2 keeps the primary decision
+cat > "$T/fc_unit1.py" <<'PYEOF'
+import copy, json, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_render as R, pm_validate as V
+S = json.load(open(sys.argv[2]))
+S["identity"].update(name="N" * 40, snapshot_at="2026-10-11T10:00:00+03:00"); S["judged_at"] = "2026-10-11T09:00:00+03:00"
+S["intent"] = {"accepted": {"outcome": "O" * 120, "done_when": "W" * 120, "exclusions": ["e" * 80] * 3, "hash": "h", "at": "2026-10-11T10:00:00+03:00", "line": 1},
+               "proposed": None, "target": {"outcome": "O" * 120, "done_when": "W" * 120, "exclusions": ["e" * 80] * 3, "hash": "h"}}
+S["headline"] = {"text": "H" * 180, "tone": "ok"}
+S["next_step"] = {"title": "T" * 80, "why": "Y" * 160, "actor": "external", "unblocks": []}
+S["since"] = {"from": {"generation": "g", "assessed_at": "2026-10-10T09:00:00+00:00"}, "commits": 9, "listed": 9, "dirty": 2, "hours": 3,
+              "changes": [{"text": "Change%d " % i + "c" * 100, "state": "landed" if i == 1 else "uncommitted", "ref": None} for i in (1, 2, 3)],
+              "attention": {"kind": "decision", "id": "D-003", "text": "x", "why": "y"}, "not_checked": []}
+S["decisions"] = [{"id": "D-%03d" % i, "status": "open", "ready": True, "q": "Question %d " % i + "q" * 130, "default": "hold",
+                   "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}]} for i in range(1, 7)]
+S["risks"] = [{"id": "R-1", "text": "r" * 120, "severity": "low"}, {"id": "R-2", "text": "s" * 120, "severity": "high"}, {"id": "R-3", "text": "t" * 120, "severity": "med"}]
+S["repos"][0]["release"] = {"line": "g" * 200}
+S["assurance"] = None
+def lines(cap):
+    R.HANDOFF_MAX = cap
+    return R.handoff(S).splitlines()
+full = lines(10000)
+MARK = [("evidence", lambda L: any(x.startswith("Evidence:") for x in L)), ("risk2", lambda L: sum(x.startswith("Open risk:") for x in L) >= 2),
+        ("risk1", lambda L: any(x.startswith("Open risk:") for x in L)), ("change3", lambda L: any(x.startswith("- Change3") for x in L)),
+        ("change2", lambda L: any(x.startswith("- Change2") for x in L)), ("change1", lambda L: any(x.startswith("- Change1") for x in L)),
+        ("since", lambda L: any(x.startswith("Since ") for x in L)), ("where", lambda L: any(x.startswith("Where it stands") for x in L)),
+        ("collapse", lambda L: any(x.startswith("Needs the owner:") and "more" in x for x in L)),
+        ("needs", lambda L: any(x.startswith("Needs the owner:") for x in L)), ("next", lambda L: any(x.startswith("Next:") for x in L)),
+        ("done", lambda L: any(x.startswith("Done when:") for x in L))]
+gone, seen_more = {}, None
+for cap in range(2700, 0, -1):
+    L = lines(cap)
+    sz = len(("\n".join(L) + "\n").encode())
+    for name, f in MARK:
+        if name == "collapse":
+            if f(L) and "collapse" not in gone:
+                gone["collapse"] = cap   # first cap at which the list is collapsed
+        elif name not in gone and not f(L):
+            gone[name] = cap
+order = [n for n, _ in sorted(gone.items(), key=lambda kv: -kv[1])]
+tiny = lines(1)
+ok = [x for x in tiny if x.startswith("Handoff · ")] and [x for x in tiny if x.startswith("Status: ")] and [x for x in tiny if x.startswith("Focus (")]
+# primary decision: the attention's decision; without it the lowest ready open id
+a = lines(1)[1]
+T2 = copy.deepcopy(S); T2["since"]["attention"] = {"kind": "continue", "text": "x", "why": "y"}
+R.HANDOFF_MAX = 1
+b = R.handoff(T2).splitlines()[1]
+print(json.dumps([order, len(gone) == len(MARK) + 0, bool(ok), tiny[-1] == R.HANDOFF_GUARD, any(x.startswith("Not in scope (owner): ") for x in tiny),
+                  a.startswith("Status: Needs you: D-003 "), b.startswith("Status: Needs you: D-001 "), full[-1] == R.HANDOFF_GUARD,
+                  [i for i, x in enumerate(full) if x.startswith(("Handoff", "Status:", "Focus (", "Done when:", "Not in scope", "Where it stands", "Since ", "- Change", "Next:", "Needs the owner:", "Open risk:", "Evidence:", "Context only"))] == list(range(len(full)))]))
+PYEOF
+t_eq "FC-handoff: the drop order is exact (cap sweep): evidence, second risk, first risk, change 3/2/1, since, where it stands, collapse of the owner list, the list, next, done-when; the never-dropped lines and the primary decision survive any cap" "$(python3 -I "$T/fc_unit1.py" "$HOOKS" "$PM/state.json")" '[["evidence", "risk2", "risk1", "change3", "change2", "change1", "since", "where", "collapse", "needs", "next", "done"], true, true, true, true, true, true, true, true]'
+
+# ---- FC-brief: line 6b, after the next step; dropped after the since line, before the attention line
+mkproj fcb || true
+t_eq "FC-brief: a proposal-only map: line 6b follows the next step and says how to confirm it" "$(awk '/^next: /{print; getline; print}' "$PM/brief.txt")" "next: Finish the cycle-2 diagnosis report (claude)
+focus: Ship the engine import (proposed: say \"confirm focus\")"
+fcset "$FC_O" "$FC_D"; facts >/dev/null
+t_has "FC-brief: after the confirmation: '(confirmed)'" "$(cat "$PM/brief.txt")" "focus: Ship the engine import (confirmed)"
+cat > "$T/fc_unit2.py" <<'PYEOF'
+import copy, json, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_render as R
+S = json.load(open(sys.argv[2]))
+S["identity"].update(name="demo", folder="~/d"); S["focus"]["label"] = "Phase"; S["headline"]["tone"] = "ok"; S["assurance"] = None
+S["usage"] = {"totals": {"all": 1.5e9, "claude": 1.0e9, "codex": 0.5e9}}
+S["repos"][0]["release"] = {"line": "tagged v3.2.3 at HEAD · in sync with origin/main (local tracking state)"}
+S["decisions"] = [d for d in S["decisions"] if d["status"] not in ("open", "overdue")]
+S["decisions"].append({"id": "D-009", "status": "overtaken", "q": "q", "overtaken_why": "Owner did it by hand", "overtaken_ref": "tag:v1"})
+S["stale"] = {"judged_at": "x", "commits_since": 3, "why": "3 new commits"}
+S["coverage"] = {"coverage": "partial", "covered": 3, "total": 9}
+S["intent"] = {"accepted": None, "proposed": {"outcome": "F" * 120, "done_when": "d", "hash": "h"}, "target": {"outcome": "F" * 120, "done_when": "d", "exclusions": [], "hash": "h"}}
+S["since"] = {"from": {"generation": "g", "assessed_at": "2026-10-10T09:00:00+00:00"}, "commits": 7, "listed": 7, "dirty": 2, "hours": 3,
+              "changes": [{"text": "Change %d is about this" % i, "state": "landed" if i == 1 else "uncommitted", "ref": None} for i in (1, 2, 3)],
+              "attention": {"kind": "waiting", "text": "Waiting on the vendor", "why": "Nothing moves without it"}, "not_checked": []}
+def lines(pad):
+    T = copy.deepcopy(S); T["headline"]["text"] = "h" * pad
+    return R.brief(T).splitlines()
+MARK = [("tokens", lambda L: any(x.startswith("tokens") for x in L)), ("git", lambda L: any(x.startswith("git:") for x in L)),
+        ("change3", lambda L: any(x.startswith("- Change 3") for x in L)), ("change2", lambda L: any(x.startswith("- Change 2") for x in L)),
+        ("change1", lambda L: any(x.startswith("- Change 1") for x in L)), ("since", lambda L: any(x.startswith("since ") for x in L)),
+        ("focus", lambda L: any(x.startswith("focus: ") for x in L)), ("attention", lambda L: any(x.startswith("attention:") for x in L)),
+        ("overtaken", lambda L: any("overtaken by events" in x for x in L)), ("coverage", lambda L: any(x.startswith("coverage partial") for x in L)),
+        ("stale", lambda L: any(x.startswith("stale:") for x in L))]
+gone = {}
+for pad in range(1, 900):
+    L = lines(pad)
+    assert len(("\n".join(L) + "\n").encode()) <= 1000 and L[-1].startswith("generation ") and L[1].startswith("as of ")
+    for name, f in MARK:
+        if name not in gone and not f(L):
+            gone[name] = pad
+order = [n for n, _ in sorted(gone.items(), key=lambda kv: kv[1])]
+full = lines(1)
+idx = lambda p: next(i for i, x in enumerate(full) if x.startswith(p))
+print(json.dumps([order, len(gone) == len(MARK), idx("next:") + 1 == idx("focus: ") and idx("focus: ") + 1 == idx("since ")]))
+PYEOF
+t_eq "FC-brief: the drop order is exact: tokens, git, change 3, 2, 1, since, FOCUS, attention, overtaken, coverage, stale (and 6b sits between next and since)" "$(python3 -I "$T/fc_unit2.py" "$HOOKS" "$PM/state.json")" '[["tokens", "git", "change3", "change2", "change1", "since", "focus", "attention", "overtaken", "coverage", "stale"], true, true]'
+
+# ---- FC-assessed: the focus clause of the ONE assurance predicate
+mkproj fca || true; upd ''
+ax ''
+t_eq "FC-assessed: a complete map with no accepted record has no focus reason" "$(axq 'd["assurance"]["why"]')" "[]"
+ax 'd["intent"]["accepted"]={"outcome":"x","done_when":"y","exclusions":[],"hash":"0000000000000000","at":None,"line":1}'
+t_eq "FC-assessed: an accepted record that is not the served intention -> not ok, 'focus changed after the assessment', case c" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(False, ['focus changed after the assessment'], 'c', 'No decision identified in the checked information')"
+ax 'd["intent"]["accepted"]=dict(d["intent"]["target"], at=None, line=1)'
+t_eq "FC-assessed: ... an accepted record equal to the target is fine" "$(axq 'd["assurance"]["why"]')" "[]"
+ax 'del d["intent"]'
+t_eq "FC-assessed: ... a state from before 3.5 (no intent) adds no focus reason" "$(axq '[w for w in d["assurance"]["why"] if "focus" in w]')" "[]"
+ax 'd["intent"]["accepted"]={"outcome":"x","done_when":"y","exclusions":[],"hash":"0000000000000000","at":None,"line":1}; d["decisions"][1]["status"]="open"; d["decisions"][1]["ready"]=True'
+t_eq "FC-assessed: ... with a ready decision open the wording is 'Needs you', never the denial" "$(axq '(d["case"], d["text"], d["assurance"]["why"][:2])')" "('a', 'Needs you', ['decision open', 'focus changed after the assessment'])"
+t_has "FC-assessed: brief line 2 carries the reason when nothing else needs the owner" "$(bf 'd["intent"]["accepted"]={"outcome":"x","done_when":"y","exclusions":[],"hash":"0000000000000000","at":None,"line":1}; d["assurance"]=None' | sed -n 2p)" "· focus changed after the assessment"
+
+# ---- FC-page: the Handoff disclosure is FIRST, the focus row sits under the attention row, Copy never claims success it did not get
+mkproj fcp2 || true; bump; begin; pub ''
+if [ $HAVE_NODE = 1 ]; then
+  rbpage
+  t_eq "FC-page: the page script ran; the first disclosure of the context list is Handoff" "$(pj '(d["error"], d["disclosures"][:2])')" "(None, ['Handoff', 'Plan vs shipped'])"
+  t_eq "FC-page: ... its <pre> holds exactly handoff.txt" "$(pj 'd["handoff"] == open("'"$PM"'/handoff.txt", encoding="utf-8").read()')" "True"
+  t_eq "FC-page: ... the focus row under the attention row says the proposal is not confirmed" "$(pj '(d["focus"], d["since"][2].startswith("Attention"), d["since"][3])')" "([['proposed', 'focus: Ship the engine import (proposed, not confirmed)']], True, 'focus: Ship the engine import (proposed, not confirmed)')"
+  t_eq "FC-page: ... the section is still hidden on a first map (its focus is in the Handoff only)" "$(mkproj fcp3 >/dev/null 2>&1; rbpage; pj '(d["sinceHidden"], d["focus"], d["disclosures"][0], "Focus (proposed, not confirmed): Ship the engine import" in d["handoff"])')" "(True, [], 'Handoff', True)"
+  # the confirmed record, with and without a different standing proposal
+  R=$(cd "$T/fcp2" && pwd -P); PM="$R/.project-map"
+  fcset "$FC_O" "$FC_D" '["no deploy"]'; bump; begin; pub 'J["intent"]={"outcome":"Rewrite the importer","done_when":"All fixtures pass"}'
+  rbpage
+  t_eq "FC-page: an accepted record + a different proposal: the confirmed focus with its date, then the suggestion" "$(pj '(d["focus"], d["since"][3:5])')" "([['confirmed', 'focus: Ship the engine import (confirmed 2026-10-11)']], ['focus: Ship the engine import (confirmed 2026-10-11)', 'the map suggests a different focus: Rewrite the importer'])"
+  t_has "FC-page: ... and the Handoff text carries the exclusions" "$(pj 'd["handoff"]')" "Not in scope (owner): no deploy"
+  for m in ok deny missing sync; do
+    PAGE=$(PM_PAGE_CLIP=$m node "$TD/pm_page.js" "$PM/index.html" 2>&1)
+    case $m in
+      ok)      t_eq "FC-page: Copy with a clipboard that resolves: 'Copied.', the whole handoff written, nothing selected" "$(pj '(d["copy"]["note"], d["copy"]["written"] == d["handoff"], d["copy"]["selected"])')" "('Copied.', True, None)";;
+      deny)    t_eq "FC-page: Copy with a clipboard that rejects: never 'Copied', the text is selected and the note says so" "$(pj '("Copied" in d["copy"]["note"], d["copy"]["selected"], d["copy"]["note"][:20])')" "(False, 'handoff-text', 'Copy was not allowed')";;
+      missing) t_eq "FC-page: Copy where there is no clipboard API: the same honest fallback" "$(pj '("Copied" in d["copy"]["note"], d["copy"]["selected"], d["error"])')" "(False, 'handoff-text', None)";;
+      sync)    t_eq "FC-page: Copy where writeText returns no promise: not a success either" "$(pj '("Copied" in d["copy"]["note"], d["copy"]["selected"])')" "(False, 'handoff-text')";;
+    esac
+  done
+  t_eq "FC-page: the button's own label never promises more than it does ('Copy handoff') and the page made no script or iframe" "$(pj '(d["copyLabel"], d["scripts"], "script" in d["created"], "img" in d["created"])')" "('Copy handoff', 0, False, False)"
+  # the markup-looking intent of FC-handoff stays inert on the page
+  R=$(cd "$T/fch2" && pwd -P); PM="$R/.project-map"
+  rbpage
+  t_eq "FC-page: markup-looking text in the handoff stays text: no script or img element, the <pre> shows it verbatim" "$(pj '(d["scripts"], "script" in d["created"], "img" in d["created"], "<script>alert(1)</script> & <b>ship</b>" in d["handoff"])')" "(0, False, False, True)"
+else
+  echo "SKIP: FC-page (node is missing)"
+fi
+t_true "FC-page: the template has the Handoff disclosure before 'Plan vs shipped', textContent only (no innerHTML), and the focus CSS" "python3 - $PM/index.html <<'PY'
+import sys
+h = open(sys.argv[1], encoding='utf-8').read()
+sys.exit(0 if h.index(\"disclosure('Handoff')\") < h.index(\"disclosure('Plan vs shipped')\") and '.innerHTML' not in h and '.since-focus{' in h and '.handoff-text{' in h else 1)
+PY"
+
+# ---- FC-links: the fifth stable path
+mkproj fcl3 || true
+t_true "FC-links: five stable symlinks into current/" "for n in index.html mobile.html brief.txt state.json handoff.txt; do [ \"\$(readlink $PM/\$n)\" = current/\$n ] || exit 1; done"
+rm "$PM/handoff.txt"; out=$(facts); t_eq "FC-links: a missing handoff link is repaired before NO_CHANGE" "$out:$(readlink "$PM/handoff.txt")" "NO_CHANGE nothing moved:current/handoff.txt"
+t_true "FC-links: the sweep removes a stale handoff.txt.tmp left by a crash" "ln -s current/handoff.txt $PM/handoff.txt.tmp && facts >/dev/null && [ ! -e $PM/handoff.txt.tmp ] && [ ! -L $PM/handoff.txt.tmp ]"
+
+# ---- FC-pre35: a 3.4 map (no intent, no handoff, no intent_hash in its judged key) is re-rendered, never re-judged for it
+mkproj fcu || true
+G=$(gen)
+lib mut "$PM/gen-$G/state.json" 'del d["intent"]; del d["handoff"]; del d["judged_key"]["intent_hash"]; d["generation_files"]=[x for x in d["generation_files"] if x!="handoff.txt"]; d["template_hash"]="old"'
+rm -f "$PM/gen-$G/handoff.txt" "$PM/handoff.txt"; lib resign "$PM/gen-$G"
+out=$(facts)
+t_eq "FC-pre35: a 3.4 generation: the upgrade is a mechanical re-render (the plugin files changed), not a judgement" "$out" "NEEDS_REFRESH plugin files changed"
+t_true "FC-pre35: ... the new generation has handoff.txt and the fifth link; the focus is 'not recorded yet'" "[ -f $PM/current/handoff.txt ] && [ \"\$(readlink $PM/handoff.txt)\" = current/handoff.txt ] && sed -n 3p $PM/handoff.txt | grep -q '^Focus (not recorded yet): '"
+t_eq "FC-pre35: ... the state does not invent an intent, the brief has no focus line" "$(S '"intent" in d'):$(grep -c '^focus:' "$PM/brief.txt")" "False:0"
+t_eq "FC-pre35: ... and the map is quiet afterwards (a judged key without intent_hash never moves)" "$(facts)" "NO_CHANGE nothing moved"
+fcset "$FC_O" "$FC_D"
+out=$(facts)
+t_pre "FC-pre35: an F-set on a map without a served intention is never model-free (no target to confirm)" "$out" "NEEDS_JUDGEMENT "
+
+# ---- FC-at (Codex I1): an owner line's `at` is validated like every other string it can put into the state, the page and the handoff
+fcat() { # AT_AS_JSON [ID]: append an owner line carrying that `at` (an F-set that confirms the proposal, or a D-001 hold)
+  python3 - "$PM/answers.jsonl" "$1" "${2:-F-set}" "$FC_O" "$FC_D" <<'PY'
+import json, sys
+p, at, i, o, d = sys.argv[1:6]
+r = {"id": i, "answer": o if i == "F-set" else "hold", "by": "owner", "at": json.loads(at)}
+if i == "F-set":
+    r["note"] = d
+open(p, "a").write(json.dumps(r, ensure_ascii=False) + "\n")
+PY
+}
+t_eq "FC-at: at_problem: absent, null, date-only, minutes, Z, offsets, fractions, a space separator are fine; control, bidi, zero-width, trailing newline, text, secrets, numbers, bad dates and long values are not" "$(python3 -I - "$HOOKS" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+ok = [None, "2026-10-11", "2026-10-11T10:00", "2026-10-11T10:00:00Z", "2026-10-11T10:00:00+03:00", "2026-10-11T10:00:00+0300", "2026-10-11T10:00:00.5+03:00", "2026-10-11 10:00:00"]
+bad = ["", "x\nFAKE:ok", "2026-10-11\n", "2026-10-11T10:00:00+03:00\nFAKE:ok", "2026-10-11‮", "2026-10-11​", "2026-10-11 x", "tomorrow", "AKIAABCDEFGHIJKLMNOP",
+       123, True, ["2026-10-11"], "2026-13-45", "2026-10-11T25:99", "2026-10-11T10:00:00+03:00" + "0" * 20, "20261011", " 2026-10-11"]
+print(json.dumps([[K.at_problem(x) for x in ok], [bool(K.at_problem(x)) for x in bad]]))
+PY
+)" '[[null, null, null, null, null, null, null, null], [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true]]'
+mkproj fct || true
+for a in '"x\nFAKE:ok"' '"2026-10-11T10:00:00+03:00\nFAKE:ok"' '"2026-10-11‮"' '"2026-10-11​"' '"tomorrow"' '"AKIAABCDEFGHIJKLMNOP"' '123' '"2026-13-45"'; do fcat "$a"; done
+fcat '"x\nFAKE:ok"' D-001
+begin
+t_pre "FC-at: confirming F-sets with a hostile at are bad lines, so the confirmation is NOT model-free" "$out" "NEEDS_JUDGEMENT 1 pending answers inv "
+t_eq "FC-at: ... all nine lines are bad, none is pending, nothing is accepted" "$(get "$STAGE/snapshot.json" '([b["line"] for b in d["answers"]["bad"]], d["answers"]["pending"], d["intent"]["accepted"])')" "([1, 2, 3, 4, 5, 6, 7, 8, 9], [], None)"
+t_eq "FC-at: ... with a reason that names the timestamp, not the text" "$(get "$STAGE/snapshot.json" 'sorted({b["why"][:18] for b in d["answers"]["bad"]})')" "['at must be an ISO-']"
+t_eq "FC-at: ... a D- answer with a hostile at does not answer the decision either" "$(get "$STAGE/snapshot.json" '[x["status"] for x in d["decisions"] if x["id"]=="D-001"]')" "['open']"
+pub ''
+t_eq "FC-at: ... published: no accepted record, nine lines consumed" "$(S '(d["intent"]["accepted"], d["answers"]["applied"])')" "(None, 9)"
+t_eq "FC-at: ... no hostile text anywhere in the handoff, the brief or the page" "$(cat "$PM/handoff.txt" "$PM/brief.txt" "$PM/index.html" | grep -c 'FAKE')" "0"
+# valid timestamps still work; an absent or null `at` is explicit, not an error
+mkproj fct2 || true; fcat 'null'; out=$(facts)
+t_eq "FC-at: a confirming F-set with at:null is model-free" "$out" "NEEDS_REFRESH focus confirmed"
+t_eq "FC-at: ... accepted.at is null and the handoff says 'confirmed' without a date" "$(S 'd["intent"]["accepted"]["at"]'):$(sed -n 3p "$PM/handoff.txt")" "None:Focus (confirmed): Ship the engine import"
+mkproj fct3 || true; fcat '"2026-10-11"'; out=$(facts)
+t_eq "FC-at: a date-only at is fine" "$out:$(sed -n 3p "$PM/handoff.txt")" "NEEDS_REFRESH focus confirmed:Focus (confirmed 2026-10-11): Ship the engine import"
+# defence in depth: a hostile at that somehow sits in a published state is never rendered beyond its date
+cat > "$T/fc_unit3.py" <<'PYEOF'
+import json, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_render as R
+S = json.load(open(sys.argv[2]))
+rec = {"outcome": "o", "done_when": "d", "exclusions": [], "hash": "h", "line": 1}
+S["intent"] = {"accepted": dict(rec, at="2026-10-11\nFAKE:ok"), "proposed": None, "target": dict(rec)}
+a = R.handoff(S).splitlines()
+S["intent"]["accepted"]["at"] = "x\nFAKE:ok"
+b = R.handoff(S).splitlines()
+print(json.dumps([a[2], b[2], not any(x.startswith("FAKE") for x in a + b), len(a) == len(b)]))
+PYEOF
+t_eq "FC-at: the handoff renderer shows only a date, whatever a state holds" "$(python3 -I "$T/fc_unit3.py" "$HOOKS" "$PM/state.json")" '["Focus (confirmed 2026-10-11): o", "Focus (confirmed): o", true, true]'
+if [ $HAVE_NODE = 1 ]; then
+  rbpage '{"since":{"from":{"generation":"g","assessed_at":"2026-10-10T09:00:00+00:00"},"commits":0,"listed":0,"dirty":0,"hours":0,"changes":[],"attention":{"kind":"continue","text":"x","why":"y"},"not_checked":[]},"intent":{"accepted":{"outcome":"o","done_when":"d","exclusions":[],"hash":"h","at":"x\nFAKE:ok","line":1},"proposed":null,"target":{"outcome":"o","done_when":"d","exclusions":[],"hash":"h"}}}'
+  t_eq "FC-at: ... and the page script shows 'confirmed' without the hostile text" "$(pj 'd["focus"]')" "[['confirmed', 'focus: o (confirmed)']]"
+fi
+
+# ---- FC-replay-equal (Codex I2): a replay that removes the accepted focus is JUDGED even when the line count and the intent hash do not move
+mkproj fcq || true
+fcset "$FC_O" "$FC_D"; out=$(facts)
+t_eq "FC-replay-equal: setup: the confirmation is applied (applied 1, accepted line 1, one answer line)" "$out:$(S '(d["answers"]["applied"], d["intent"]["accepted"]["line"], d["judged_key"]["answers_count"], [x["status"] for x in d["decisions"] if x["id"]=="D-001"])')" "NEEDS_REFRESH focus confirmed:(1, 1, 1, ['open'])"
+printf '{"id":"D-001","answer":"hold","by":"owner"}\n' > "$PM/answers.jsonl"
+out=$(facts); t_pre "FC-replay-equal: the owner rewrites the only line (F-set -> a D-001 answer): same line count, ERROR answers rewritten" "$out" "ERROR answers rewritten"
+out=$(python3 "$HOOKS/project-map-facts.py" --accept-answers "$R"); t_has "FC-replay-equal: --accept-answers says the focus is gone" "$out" "focus after the replay: none (no F-set line)"
+eo=$(embed --mechanical)
+t_pre "FC-replay-equal: a plain mechanical refresh (plugin update, hourly) in between" "$eo" "PM_EMBED_OK"
+t_eq "FC-replay-equal: ... keeps the map honest: behind, because the rebaseline is outstanding; the old record is still what was judged" "$(S '(d["stale"]["why"], d["intent"]["accepted"]["line"], d["answers"]["applied"])')" "('answers replayed', 1, 1)"
+t_has "FC-replay-equal: ... brief line 2 says so" "$(sed -n 2p "$PM/brief.txt")" "behind: answers replayed"
+begin
+t_pre "FC-replay-equal: with NO repository change the next facts run stages a judgement (before: NO_CHANGE and D-001 pending forever)" "$out" "NEEDS_JUDGEMENT answers replayed inv "
+t_eq "FC-replay-equal: ... the staged snapshot has no accepted record and the replacement answer applied by the lifecycle" "$(get "$STAGE/snapshot.json" '(d["intent"]["accepted"], [a["id"] for a in d["answers"]["pending"]], [x["status"] for x in d["decisions"] if x["id"]=="D-001"], d["answers"]["applied"])')" "(None, ['D-001'], ['answered'], 0)"
+pub ''
+t_pre "FC-replay-equal: the judgement publishes" "$eo" "PM_EMBED_OK"
+t_eq "FC-replay-equal: ... accepted is null (the model's text is the proposal), D-001 is answered, the replayed line is consumed" "$(S '(d["intent"]["accepted"], d["intent"]["proposed"]["outcome"], [x["status"] for x in d["decisions"] if x["id"]=="D-001"], d["answers"]["applied"], d["stale"])')" "(None, 'Ship the engine import', ['answered'], 1, None)"
+t_eq "FC-replay-equal: ... and the next facts run is quiet" "$(facts)" "NO_CHANGE nothing moved"
+t_eq "FC-replay-equal: ... the handoff no longer calls the focus confirmed" "$(sed -n 3p "$PM/handoff.txt")" "Focus (proposed, not confirmed): Ship the engine import"
+
+# ---- FC-image (Codex I3): embed --apply-answers uses the ONE image it took, at the boundary between taking it and collecting
+fcseam() { # NAME ACTION: run `embed --mechanical --apply-answers` paused right after it took its answers image; ACTION (eval'd) runs at the seam
+  local n=$1 act=$2 i
+  ( PM_EMBED_AFTER_IMAGE="$T/$n.sig" embed --mechanical --apply-answers > "$T/$n.out" 2>&1 ) & FCP=$!; BGPIDS="$BGPIDS $FCP"
+  for i in $(seq 1 400); do [ -e "$T/$n.sig" ] && break; sleep 0.05; done
+  [ -e "$T/$n.sig" ] || bad "FC-image $n" "the embed never reached the seam"
+  eval "$act"
+  : > "$T/$n.sig.go"; wait $FCP
+}
+# (a) a D- answer is appended right after the image: the image has ONE line, the publication must say exactly that
+mkproj fci1 || true; fcset "$FC_O" "$FC_D"
+L1=$(head -n 1 "$PM/answers.jsonl" | shasum -a 256 | cut -d' ' -f1)
+fcseam fci1 'printf "{\"id\":\"D-001\",\"answer\":\"hold\",\"by\":\"owner\"}\n" >> "$PM/answers.jsonl"'
+t_pre "FC-image: a D- line appended right after the image: the confirmation of the image's one line is applied" "$(cat "$T/fci1.out")" "PM_EMBED_OK"
+t_not "FC-image: ... without a note" "$(cat "$T/fci1.out")" "PM_EMBED_NOTE"
+t_eq "FC-image: ... the state consumed exactly the image: applied 1 of 1, the judged key counts 1, accepted line 1" "$(S '(d["answers"]["applied"], d["answers"]["total"], d["judged_key"]["answers_count"], d["intent"]["accepted"]["line"])')" "(1, 1, 1, 1)"
+t_eq "FC-image: ... applied_hash is the hash of that ONE line, not of the two-line file" "$(S 'd["answers"]["applied_hash"]')" "$L1"
+t_eq "FC-image: ... the generation's snapshot agrees: total 1, applied 1, nothing pending, key count 1" "$(get "$PM/current/snapshot.json" '(d["answers"]["total"], d["answers"]["applied"], d["answers"]["pending"], d["key"]["answers_count"])')" "(1, 1, [], 1)"
+out=$(facts)
+t_pre "FC-image: ... the next facts run sees the D- answer and stages the judgement" "$out" "NEEDS_JUDGEMENT 1 pending answers inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FC-image: ... whose snapshot has that line pending and answered by the lifecycle" "$(get "$STAGE/snapshot.json" '([a["id"] for a in d["answers"]["pending"]], [x["status"] for x in d["decisions"] if x["id"]=="D-001"])')" "(['D-001'], ['answered'])"
+pub ''
+t_eq "FC-image: ... and the judgement answers D-001 (applied 2)" "$(S '([x["status"] for x in d["decisions"] if x["id"]=="D-001"], d["answers"]["applied"])')" "(['answered'], 2)"
+# (a2) a SECOND confirming F-set is appended right after the image: it is a later append, picked up by the next run
+mkproj fci2 || true; fcset "$FC_O" "$FC_D"
+fcseam fci2 'fcset "$FC_O" "$FC_D"'
+t_eq "FC-image: a second confirming F-set appended right after the image: the first is applied, the judged key counts 1" "$(S '(d["answers"]["applied"], d["judged_key"]["answers_count"], d["intent"]["accepted"]["line"])')" "(1, 1, 1)"
+out=$(facts)
+t_eq "FC-image: ... and the next run consumes the second one model-free (it would be NO_CHANGE if the key had counted both)" "$out:$(S '(d["answers"]["applied"], d["intent"]["accepted"]["line"])')" "NEEDS_REFRESH focus confirmed:(2, 2)"
+# (b) an unfinished last line becomes complete right after the image: the tail flag and the counts are the image's
+mkproj fci3 || true; fcset "$FC_O" "$FC_D"; printf '{"id":"D-001","answer":"hold","by":"owner"}' >> "$PM/answers.jsonl"
+fcseam fci3 'printf "\n" >> "$PM/answers.jsonl"'
+t_has "FC-image: an unfinished last line completed right after the image: not applied (the image had a tail)" "$(cat "$T/fci3.out")" "PM_EMBED_NOTE answers not applied: answers.jsonl has an uncommitted last line"
+t_eq "FC-image: ... nothing consumed (applied 0, accepted null) and the stale reason counts the IMAGE's one complete line" "$(S '(d["answers"]["applied"], d["intent"]["accepted"], d["stale"]["why"])')" "(0, None, '1 pending answers')"
+out=$(facts)
+t_pre "FC-image: ... the next run sees both complete lines and stages the judgement (a D- answer is never model-free)" "$out" "NEEDS_JUDGEMENT 2 pending answers inv "
 
 echo; echo "total $((pass+fail)) pass $pass fail $fail"; [ "$fail" = 0 ]

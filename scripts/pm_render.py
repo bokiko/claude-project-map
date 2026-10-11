@@ -77,7 +77,7 @@ def _line2(S):
 def brief(S):
     """<= 1000 bytes including the final newline, whole lines only, in the fixed display order of 13.6. When the lines do not
     fit they are dropped by priority: tokens, git, the change lines (last first), the since line, attention, overtaken,
-    stale / coverage (3.5 and 3.6 add their lines to this order); then the decisions collapse into `+N more decisions`.
+    focus (6b, 3.5), attention, overtaken, stale / coverage (3.6 adds its line); then the decisions collapse into `+N more decisions`.
     Lines 1-3, 6 and the generation trailer are never dropped; line 2 is never cut mid-field (each field has its own cap)."""
     gen = S["generation"]
     trailer = "generation %s" % gen
@@ -96,6 +96,10 @@ def brief(S):
         dl.append((d["id"], "%s needs you: %s (default %s%s)" % (d["id"], d["q"], d["default"], by)))
     ns = S["next_step"]
     l6 = "next: %s (%s)" % (ns["title"], ns["actor"])
+    l6b = ""
+    foc = _focus_of(S)
+    if foc:   # 14.5: the owner's confirmed focus, or the map's proposal with the words that confirm it
+        l6b = "focus: %s (%s)" % (foc["outcome"], "confirmed" if foc["confirmed"] else 'proposed: say "confirm focus"')
     sn = S.get("since") if isinstance(S.get("since"), dict) else None
     l5, l7, l8 = "", "", []
     if sn:
@@ -127,9 +131,9 @@ def brief(S):
             tl += " · usage as of %s" % (str((S["usage"]).get("at") or "")[:16].replace("T", " ") or "an earlier run")
 
     # sections in display order; each droppable group is a list so its lines can go one by one, last first
-    sec = {"d": [t for _i, t in dl], "5": [l5] if l5 else [], "7": [l7] if l7 else [], "8": l8, "9": ov, "10": [rl] if rl else [],
-           "11": stale_l, "12": [tl] if tl else []}
-    order = ["d", "5", "6", "7", "8", "9", "10", "11", "12"]
+    sec = {"d": [t for _i, t in dl], "5": [l5] if l5 else [], "6b": [l6b] if l6b else [], "7": [l7] if l7 else [], "8": l8, "9": ov,
+           "10": [rl] if rl else [], "11": stale_l, "12": [tl] if tl else []}
+    order = ["d", "5", "6", "6b", "7", "8", "9", "10", "11", "12"]
 
     def render(more=0):
         out = [l1, l2, l3]
@@ -145,7 +149,7 @@ def brief(S):
     def size(lines):
         return sum(C.blen(x) + 1 for x in lines)
 
-    for key in ("12", "10", "8", "7", "5", "9", "11"):   # drop order of 13.6 (6b and 11b join in 3.5 / 3.6)
+    for key in ("12", "10", "8", "7", "6b", "5", "9", "11"):   # drop order of 13.6 / 14.5 (11b joins in 3.6)
         while size(render()) > BRIEF_MAX and sec[key]:
             sec[key].pop()
     if size(render()) > BRIEF_MAX and sec["d"]:   # the existing `+N more decisions` collapsing
@@ -159,3 +163,123 @@ def brief(S):
         if size(out) > BRIEF_MAX and drop in out:
             out.remove(drop)
     return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------- handoff.txt (14.5)
+HANDOFF_MAX = 1500
+HANDOFF_GUARD = "Context only, not permission: no push, delete, spend, deploy or infrastructure change without the owner."
+
+
+def _focus_of(S):
+    """The focus to show: the owner's accepted record, else the map's proposal (target as a last resort). -> {outcome, done_when,
+    exclusions, confirmed, at} or None (a state from before 3.5, or one that carries no intent)."""
+    it = S.get("intent")
+    if not isinstance(it, dict):
+        return None
+    a = it.get("accepted") if isinstance(it.get("accepted"), dict) else None
+    p = a or (it.get("proposed") if isinstance(it.get("proposed"), dict) else None) or (it.get("target") if isinstance(it.get("target"), dict) else None)
+    if not p or not isinstance(p.get("outcome"), str):
+        return None
+    at = (a or {}).get("at")
+    d = re.match(r"\d{4}-\d{2}-\d{2}", at) if isinstance(at, str) else None   # only the DATE is shown, whatever a state holds
+    return {"outcome": C.trim(p["outcome"], 120), "done_when": C.trim(str(p.get("done_when") or ""), 120),
+            "exclusions": [C.trim(str(x), 80) for x in (p.get("exclusions") or [])][:3] if a else [],
+            "confirmed": a is not None, "at": d.group(0) if d else None}
+
+
+def _primary_decision(S):
+    """The decision line 2 names (14.5, Q8): the primary attention's decision while it is still a ready open decision, else the
+    lowest ready open id; None when no decision needs the owner."""
+    ids = VAL.ask_ids(S.get("decisions") or [])
+    if not ids:
+        return None
+    sn = S.get("since") if isinstance(S.get("since"), dict) else {}
+    att = sn.get("attention") if isinstance(sn.get("attention"), dict) else {}
+    pid = att.get("id") if att.get("kind") == "decision" and att.get("id") in ids else ids[0]
+    return next(d for d in S["decisions"] if d.get("id") == pid)
+
+
+def _need_entry(d):
+    """`D-004 <q> (default <d>)`, the whole entry cut to 100 bytes by shortening the question, never the tail."""
+    tail = " (default %s)" % d.get("default", "hold")
+    head = "%s " % d["id"]
+    return head + C.trim(d.get("q", ""), max(10, 100 - C.blen(head) - C.blen(tail))) + tail
+
+
+def handoff(S):
+    """handoff.txt (<= 1500 bytes including the final newline): a copyable, bounded assignment for the next agent (14.5). Lines in
+    display order; when over the cap they are dropped in this order: 12, 11 (second first), 8 (last first), 7, 9b, 6, 10
+    (collapsing to `+N more` first, then the whole line), 9, 4. Lines 1, 2, 3, 5 and 13 are never dropped, and line 2 names the
+    primary decision when one is known, so the handoff never denies a decision the map knows about. It says what the map
+    judged, not what is permitted: line 13 is the standing reminder."""
+    idn = S["identity"]
+    l1 = "Handoff \u00b7 %s \u00b7 as of %s \u00b7 assessed %s" % (
+        C.trim(idn.get("name", ""), 40), (idn.get("snapshot_at") or "")[:16], (S.get("judged_at") or "")[:16])
+    l2 = "Status: " + VAL.needs_text(S)   # the ONE three-way wording (13.4)
+    case = VAL.needs_case(S)
+    if case == "a":
+        pd = _primary_decision(S)
+        l2 += ": %s %s" % (pd["id"], C.trim(pd.get("q", ""), 80))
+    elif case == "c":
+        why = ((S.get("assurance") or VAL.assurance(S)).get("why") or [""])[0]
+        l2 += ": " + C.trim(why, 40) if why else ""
+    foc = _focus_of(S)
+    if foc:
+        l3 = "Focus (%s): %s" % (("confirmed " + foc["at"]) if foc["confirmed"] and foc["at"] else
+                                  "confirmed" if foc["confirmed"] else "proposed, not confirmed", foc["outcome"])
+        l4 = "Done when: %s" % foc["done_when"]
+        l5 = "Not in scope (owner): %s" % "; ".join(foc["exclusions"]) if foc["exclusions"] else ""
+    else:
+        l3, l4, l5 = "Focus (not recorded yet): the next assessment proposes one", "", ""
+    l6 = "Where it stands: %s" % C.trim((S.get("headline") or {}).get("text", ""), 180)
+    sn = S.get("since") if isinstance(S.get("since"), dict) else None
+    l7, l8 = "", []
+    if sn:
+        l7 = "Since %s: %d commits \u00b7 %d uncommitted" % ((((sn.get("from") or {}).get("assessed_at")) or "the previous assessment")[:16],
+                                                          sn.get("commits") or 0, sn.get("dirty") or 0)
+        if isinstance(sn.get("listed"), int) and sn["listed"] < (sn.get("commits") or 0):
+            l7 += " \u00b7 %d of %d shown" % (sn["listed"], sn["commits"])
+        for c in (sn.get("changes") or [])[:3]:
+            l8.append("- %s \u00b7 %s" % (C.trim(c.get("text", ""), 120), "landed, not checked" if c.get("state") == "landed" else "uncommitted"))
+    ns = S.get("next_step") or {}
+    l9 = "Next: %s (%s): %s" % (C.trim(ns.get("title", ""), 80), ns.get("actor", ""), C.trim(ns.get("why", ""), 160))
+    ents = [_need_entry(d) for d in S.get("decisions") or [] if isinstance(d, dict) and d.get("id") in VAL.ask_ids(S.get("decisions") or [])]
+    sev = {"high": 0, "med": 1, "low": 2}
+    l11 = ["Open risk: %s %s" % (r.get("id", ""), C.trim(r.get("text", ""), 120))
+           for r in sorted([r for r in S.get("risks") or [] if isinstance(r, dict)], key=lambda r: sev.get(r.get("severity"), 3))[:2]]
+    r0 = next((r for r in S.get("repos") or [] if isinstance(r, dict)), None)
+    l12 = "Evidence: git: " + C.trim(r0["release"]["line"], 160) if r0 and isinstance(r0.get("release"), dict) and r0["release"].get("line") else ""
+
+    st = {"4": [l4] if l4 else [], "6": [l6], "7": [l7] if l7 else [], "8": l8, "9": [l9], "11": l11, "12": [l12] if l12 else [], "more": 0}
+
+    def line10():
+        if not ents:
+            return []
+        keep = ents[:len(ents) - st["more"]]
+        return ["Needs the owner: " + "; ".join(keep) + ("; +%d more" % st["more"] if st["more"] else "")] if keep else []
+
+    st["10"] = True   # line 10 is shown until it is dropped whole
+
+    def render():
+        out = [l1, l2, l3] + st["4"]
+        if l5:
+            out.append(l5)
+        out += st["6"] + st["7"] + st["8"] + st["9"]
+        if st["10"]:
+            out += line10()
+        return out + st["11"] + st["12"] + [HANDOFF_GUARD]
+
+    def size():
+        return sum(C.blen(x) + 1 for x in render())
+
+    for key in ("12", "11", "8", "7", "6"):   # 9b (3.6) sits between 7 and 6
+        while size() > HANDOFF_MAX and st[key]:
+            st[key].pop()
+    while size() > HANDOFF_MAX and st["10"] and len(ents) - st["more"] > 1:   # collapse to `+N more`, then drop the whole line
+        st["more"] += 1
+    if size() > HANDOFF_MAX:
+        st["10"] = False
+    for key in ("9", "4"):
+        while size() > HANDOFF_MAX and st[key]:
+            st[key].pop()
+    return "\n".join(render()) + "\n"

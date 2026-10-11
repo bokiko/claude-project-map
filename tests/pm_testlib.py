@@ -55,8 +55,22 @@ def valid_since(J, snap):
     return {"changes": [], "attention": att, "not_checked": []}
 
 
+PROPOSAL = {"outcome": "Ship the engine import", "done_when": "The import runs on the fixture project"}
+
+
+def valid_intent(stage):
+    """judgement.intent (14.1): the pack's accepted focus copied verbatim when the owner has one (the model's rule: copy it
+    unless the evidence shows it is reached or wrong), else a fixed proposal. Never exclusions or a hash: those are script-owned."""
+    try:
+        acc = (json.load(open(os.path.join(stage, "pack.json"))).get("intent") or {}).get("accepted") if stage else None
+    except (OSError, ValueError):
+        acc = None
+    return {"outcome": acc["outcome"], "done_when": acc["done_when"]} if isinstance(acc, dict) else dict(PROPOSAL)
+
+
 def build(inv, kind, stage=None):
-    """Judgement + plan shaped like the demo-app fixture, in the 3.2 schema (+ the 3.4 `since` block when the pack has a baseline)."""
+    """Judgement + plan shaped like the demo-app fixture, in the 3.2 schema (+ the 3.4 `since` block when the pack has a baseline,
+    + the 3.5 `intent`)."""
     F = json.load(open(FIX))
     parts = []
     for p in F["parts"]:
@@ -81,6 +95,7 @@ def build(inv, kind, stage=None):
          "eta": {"low": 2, "high": 4, "unit": "days", "basis": F["eta"]["basis"][:70], "confidence": "low"},
          "next_step": {"title": F["next_step"]["title"], "why": F["next_step"]["why"], "actor": "claude", "unblocks": ["qualification"]},
          "decisions": decs,
+         "intent": valid_intent(stage),
          "loops": [{"id": "L-01", "kind": "retry", "rounds": 2, "failed": 2, "note": "Full-model check"}],
          "risks": [{"id": "R-1", "text": F["risks"][0]["text"][:110], "severity": "high"}]}
     names = [m["label"] for m in F["milestone"]["list"]]

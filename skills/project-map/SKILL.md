@@ -54,6 +54,10 @@ FULL runs may add `TEMPLATE_FEEDBACK:` lines: show them as suggestions only.
 ## 5. Decisions
 Relay each `ASK:` line as one question (AskUserQuestion): recommended option first, the default and deadline stated; hard-rule decisions marked "waits until you answer". Keep working meanwhile. When the owner answers, append one line to `<ROOT>/.project-map/answers.jsonl`: `{"id":"D-004","answer":"A","at":"<iso>","by":"owner"}` (`"answer":"hold"` is valid), then rerun from step 1. The map never authorizes a hard-rule action; that needs the owner's explicit approval.
 
+Focus (3.5), only when the owner says it. **"confirm focus"**: append `{"id":"F-set","answer":"<outcome>","note":"<done when>","exclusions":["..."],"at":"<iso>","by":"owner"}` with the proposal's (or the accepted record's) `outcome` and `done_when` verbatim and the CURRENTLY accepted `exclusions` kept unless the owner asks to drop them (read all three with `jq -c .intent <ROOT>/.project-map/current/state.json`), then rerun from step 1: a plain confirmation is applied without a model call (`NEEDS_REFRESH focus confirmed`).
+**"the focus is X, done when Y"**: the same line with their words (`exclusions` only if they state them: at most 3, 80 bytes each). **"handoff"**: `cat <ROOT>/.project-map/current/handoff.txt` and print it.
+Never ask about the focus on an ordinary refresh.
+
 ## 6. Recovery
 - `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/project-map-facts.py --close-session <ROOT>`: after an uncertain agent termination; this session then accepts no further map agent.
 - `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/project-map-facts.py --accept-answers <ROOT>`: after an intentional edit of `answers.jsonl`.

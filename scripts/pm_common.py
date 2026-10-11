@@ -14,13 +14,14 @@ import re
 import secrets
 import stat as _stat
 import time
+import unicodedata
 
 SCHEMA_STATE = "project-map-4"
 SCHEMA_PLAN = "project-map-plan-1"
 GEN_RE = re.compile(r"^gen-(\d{6})-([0-9a-f]{8})$")          # directory name
 GENSTR_RE = re.compile(r"^(\d{6})-([0-9a-f]{8})$")           # <seq>-<id> as stored in files
 INV_RE = re.compile(r"^inv-([0-9a-f]{8})$")
-STABLE = ("index.html", "mobile.html", "brief.txt", "state.json")
+STABLE = ("index.html", "mobile.html", "brief.txt", "state.json", "handoff.txt")   # 3.5.0: handoff.txt is the fifth stable path
 
 
 class Busy(Exception):
@@ -130,6 +131,19 @@ def canon(obj):
 
 def digest(obj):
     return sha12(canon(obj).encode("utf-8", "replace"))
+
+
+def _intent_norm(s):
+    """NFC, then every run of whitespace collapsed to one space, no leading or trailing space."""
+    return " ".join(unicodedata.normalize("NFC", str(s)).split())
+
+
+def intent_hash(outcome, done_when, exclusions=None):
+    """14.1 intent identity: the first 16 hex characters of sha256 over the canonical JSON `[outcome, done_when, exclusions]`
+    after NFC normalisation and whitespace collapsing of each string, exclusions sorted (`[]` when absent). The ONE
+    function behind accepted.hash, target.hash, proposed.hash and the `intent_hash` key component: consent binds to the words."""
+    ex = sorted(_intent_norm(x) for x in (exclusions or []))
+    return sha256_bytes(canon([_intent_norm(outcome), _intent_norm(done_when), ex]).encode("utf-8", "replace"))[:16]
 
 
 # ---------------------------------------------------------------- bytes-aware strings

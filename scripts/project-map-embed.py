@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""project-map-embed.py ROOT inv-<id> [--deadline S]   |   ROOT --mechanical [--deadline S]   (entry: project-map-embed.sh)
+"""project-map-embed.py ROOT inv-<id> [--deadline S]   |   ROOT --mechanical [--deadline S] [--apply-answers]   (entry: project-map-embed.sh)
 
 Publishes one immutable generation (INTERFACES-3.2 section 1.3) and prints exactly one of
     PM_EMBED_OK gen <seq>-<id> <bytes>        exit 0   (an extra PM_EMBED_STALE <why> line when the repo moved meanwhile)
@@ -8,7 +8,10 @@ Publishes one immutable generation (INTERFACES-3.2 section 1.3) and prints exact
 
 Normal mode validates STAGE/judgement.out.json (+ plan.out.json on FULL) against STAGE/snapshot.json and merges them with the
 carried plan into state.json (schema project-map-4). Mechanical mode (2.1) re-renders the pinned current generation with fresh
-mechanical facts only: same judgement, plan and assessment time, no history entry.
+mechanical facts only: same judgement, plan and assessment time, no history entry. `--apply-answers` (mechanical only, 3.5.0, used
+by facts' model-free "focus confirmed" path and by nothing else) additionally applies the owner's F-set lines when they are a plain
+confirmation of the focus the last assessment served (14.3); otherwise it publishes the ordinary refresh and prints
+`PM_EMBED_NOTE answers not applied: <reason>` after PM_EMBED_OK.
 Test hook: PM_EMBED_CRASH_AT=tmpdir|files|manifest|gen_rename|pointer|links kills the process (os._exit) after that step.
 """
 import copy
@@ -145,9 +148,10 @@ def read_legacy_files(pm):
     return out
 
 
-def cache_merge(pm, cache, moved_from=None, moved_to=None):
+def cache_merge(pm, cache, moved_from=None, moved_to=None, clear_accept=False):
     """Persist watch_cache + coverage_cursor, keep every other key. An accepted answers re-baseline follows the
-    current pointer when a mechanical re-render moves it (moved_from -> moved_to)."""
+    current pointer when a mechanical re-render moves it (moved_from -> moved_to); a refresh that applied the owner's answers
+    (--apply-answers) carries the new applied count in its own state, so the re-baseline is spent (clear_accept)."""
     cur = C.load_json(os.path.join(pm, "cache.json"), {})
     cur = cur if isinstance(cur, dict) else {}
     try:   # acknowledge the plugin files this publish rendered with (same hashes the prompt hook compares)
@@ -159,7 +163,9 @@ def cache_merge(pm, cache, moved_from=None, moved_to=None):
         if k in cache:
             cur[k] = cache[k]
     aa = cur.get("answers_accept")
-    if moved_to and isinstance(aa, dict) and aa.get("gen") == moved_from:
+    if clear_accept:
+        cur.pop("answers_accept", None)
+    elif moved_to and isinstance(aa, dict) and aa.get("gen") == moved_from:
         aa["gen"] = moved_to
     try:
         C.atomic_write(os.path.join(pm, "cache.json"), C.dumps(cur))
@@ -182,7 +188,12 @@ def finish_files(S, snap, plan, judgement, extra, tpl=TEMPLATE):
     files["judgement.json"] = C.dumps(dict(judgement, generation=gen), indent=1)
     for rel, data in extra.items():
         files[rel] = data
-    S["generation_files"] = sorted(list(files) + ["state.json", "index.html", "mobile.html", "brief.txt", "manifest.json"])
+    ho = R.handoff(S)   # 14.5: every generation, signed through the manifest; the page prints S["handoff"], the same text
+    if C.blen(ho) > R.HANDOFF_MAX:
+        raise EmbedError("handoff over %d bytes" % R.HANDOFF_MAX)
+    S["handoff"] = ho
+    files["handoff.txt"] = ho
+    S["generation_files"] = sorted(set(files) | set(C.STABLE) | {"state.json", "manifest.json"})
     blob = C.dumps(S, indent=1)
     if C.blen(blob) > STATE_MAX:
         raise EmbedError("state is %d bytes, over %d" % (C.blen(blob), STATE_MAX))
@@ -450,7 +461,8 @@ def embed_normal(root, inv_name, clock):
             except K.AnswersRewritten:
                 raise EmbedError("answers rewritten while the judgement was written: run facts again")
             if late:
-                snap2 = dict(snap2, decisions=late["decisions"], answers=late["answers"])
+                # every appended line went through the one reducer: the owner's F-set lines are reduced with the D- answers
+                snap2 = dict(snap2, decisions=late["decisions"], answers=late["answers"], intent=late["intent"])
                 notes.append("owner answer for %s arrived during the judgement and wins over its closure by events; "
                              "the map is stale for the new answers, run /project-map again" % ", ".join(late["won"]))
             left = [i for i in closing if not late or i not in late["won"]]
@@ -468,7 +480,8 @@ def embed_normal(root, inv_name, clock):
 
         def make(genstr):
             c = {"root": root, "snap": snap2, "J": J, "plan": final_plan, "prev": pseudo, "genstr": genstr, "base": cur,
-                 "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale, "judged_seen": judged_seen}
+                 "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale, "judged_seen": judged_seen,
+                 "staged_intent": snap.get("intent")}   # the target is frozen from the STAGED input (14.3), accepted from snap2
             S = VAL.build_state(c)
             if prevp["kind"] != "v4":
                 S["changes"] = []
@@ -492,7 +505,43 @@ def K_cache(pm):
 
 
 # ---------------------------------------------------------------- mechanical mode (2.1)
-def embed_mechanical(root, clock):
+def image_seam():
+    """Test hook PM_EMBED_AFTER_IMAGE=<file>: right after --apply-answers took its ONE answers image, create <file> and wait (at most
+    20 s) for <file>.go, so a test can append to answers.jsonl exactly between the image and everything that must use it."""
+    sig = os.environ.get("PM_EMBED_AFTER_IMAGE")
+    if not sig:
+        return
+    with open(sig, "w"):
+        pass
+    end = time.monotonic() + 20.0
+    while not os.path.exists(sig + ".go") and time.monotonic() < end:
+        time.sleep(0.02)
+
+
+def focus_confirmation(prev, snap, cmp, image):
+    """14.3, evaluated INSIDE the refresh, under the publish lock, on its pinned generation (`prev`), its own snapshot and the ONE
+    answers.jsonl image the collection used. -> (accepted record, "") when every condition holds, else (None, reason):
+    no uncommitted tail; the only key component that moved is answers_count; every complete line after the pinned `applied` is a
+    well-formed F-set with the identity of the focus the last assessment served (K.confirmation_only, the predicate facts used).
+    The staged prefix is verified by the collection itself (a rewritten file is an error there)."""
+    lines, tail = image
+    if prev.get("unverified"):
+        return None, "the pinned generation is not verified"
+    if tail:
+        return None, "answers.jsonl has an uncommitted last line"
+    if not cmp["moved"]:
+        return None, "no new answer lines"
+    if cmp["moved"] != ["answers_count"]:
+        return None, "other facts moved: %s" % ", ".join(cmp["moved"])
+    if not K.confirmation_only(prev["state"], lines, prev["applied"]):
+        return None, "the new lines are not a plain confirmation of the focus"
+    pending, _bad = K.parse_pending(lines[prev["applied"]:])
+    it = K.intent_base(prev)
+    K.apply_answers({}, pending, it)   # the same reducer as every other owner line
+    return it["accepted"], ""
+
+
+def embed_mechanical(root, clock, apply_answers=False):
     pm = os.path.join(root, ".project-map")
     if not os.path.isdir(pm) or os.path.islink(pm):
         raise EmbedError("no .project-map directory")
@@ -519,8 +568,13 @@ def embed_mechanical(root, clock):
             ua = C.parse_iso(u0.get("at")) if u0 else None
             want_usage = u0 is None or ua is None or (C.now() - ua).total_seconds() >= 3600
             margin = max(USAGE_RENDER_MARGIN, total * 0.2) if total else 0.0
+            # --apply-answers: ONE read of answers.jsonl serves the collection, the staged-prefix check, the confirmation test and
+            # the tail flag, so the decision and the published state describe the same bytes
+            image = K.answers_image(pm) if apply_answers else None
+            if apply_answers:
+                image_seam()
             snap = K.collect(root, prev, hd, cache, git_timeout=gt, want_usage=want_usage, usage_timeout=60.0,
-                             usage_until=(clock.t0 + total - margin) if total else None, usage_prev=u0)
+                             usage_until=(clock.t0 + total - margin) if total else None, usage_prev=u0, answers_image=image)
         except K.GitCollectError as ex:
             raise EmbedError("git_error: %s" % ex)
         except K.AnswersUnreadable as ex:
@@ -535,6 +589,17 @@ def embed_mechanical(root, clock):
         for p in cmp0["adopt"]:   # a watched path hashed completely for the first time adopts that hash
             jk["watch_hashes"][p] = snap["key"]["watch_hashes"][p]
         cmp = K.compare_keys(jk, snap["key"], snap)
+        notes, focus, image_lines = [], None, None
+        if apply_answers:
+            focus, why_not = focus_confirmation(prev, snap, cmp, image)
+            if focus is None:   # the ordinary refresh below; the caller (facts) re-collects and stages the judgement
+                notes.append("answers not applied: %s" % why_not)
+            else:
+                image_lines = image[0]
+                ph = K.prefix_hash(image_lines, len(image_lines))
+                jk["answers_count"], jk["intent_hash"] = snap["key"]["answers_count"], focus["hash"]   # the key now includes the lines
+                snap = dict(snap, answers=dict(snap["answers"], applied=len(image_lines), applied_hash=ph, pending=[]))
+                cmp = K.compare_keys(jk, snap["key"], snap)
         S = copy.deepcopy(S0)
         th, eh = K.plugin_hashes()
         snap = dict(snap, template_hash=th, embed_hash=eh, prev_key=jk)
@@ -548,9 +613,16 @@ def embed_mechanical(root, clock):
             elif isinstance(T.get("usage"), dict):
                 T["usage"] = K.clean_usage(T["usage"])   # numbers kept from an older build lose any free-text job label
             T["coverage"] = {"coverage": snap["status"]["coverage"], "covered": snap["status"]["covered"], "total": snap["status"]["total"]}
-            T["stale"] = ({"judged_at": S0.get("judged_at"), "commits_since": snap["commits"]["count"], "why": cmp["why"]}
-                          if cmp["moved"] else None)
+            replay = bool(prev.get("replay")) and focus is None   # an outstanding rebaseline keeps the map behind until a judgement
+            T["stale"] = ({"judged_at": S0.get("judged_at"), "commits_since": snap["commits"]["count"],
+                           "why": "answers replayed" + ("; " + cmp["why"] if cmp["why"] else "") if replay else cmp["why"]}
+                          if (cmp["moved"] or replay) else None)
             T["template_hash"], T["embed_hash"], T["judged_key"] = th, eh, jk
+            if focus is not None:   # the owner confirmed the focus the last assessment served: the record, the answers it consumed
+                it = dict(T.get("intent") or {}, accepted=copy.deepcopy(focus))   # target and any later key (drift) stay as judged
+                T["intent"] = K.reconcile_intent(it)
+                T["answers"] = dict(T["answers"], total=len(image_lines), applied=len(image_lines),
+                                    applied_hash=snap["answers"]["applied_hash"])
             # a closed decision (answered / defaulted / overtaken) lives for one published generation, S0 was it: this refresh
             # drops it and retires its id exactly as the next judgement would. Newly answered decisions are not touched: an
             # answer not yet applied (answers.applied) stays pending in answers.jsonl for the next judgement.
@@ -579,8 +651,8 @@ def embed_mechanical(root, clock):
         if now_cur != cur:
             raise Superseded(cur, now_cur)
         genstr = publish(pm, make, False, clock)
-        cache_merge(pm, cache, cur, genstr)
-        return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), None, []
+        cache_merge(pm, cache, cur, genstr, clear_accept=focus is not None)
+        return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), None, notes
     finally:
         lock.release()
 
@@ -596,12 +668,14 @@ def default_root():
 
 def main(argv):
     args = argv[1:]
-    mech, deadline, pos, i = False, None, [], 0
+    mech, deadline, pos, i, apply_a = False, None, [], 0, False
     try:
         while i < len(args):
             a = args[i]
             if a == "--mechanical":
                 mech = True
+            elif a == "--apply-answers":
+                apply_a = True
             elif a == "--deadline":
                 deadline = float(args[i + 1])
                 i += 1
@@ -612,10 +686,10 @@ def main(argv):
             else:
                 pos.append(a)
             i += 1
-        if mech and len(pos) > 1 or (not mech and len(pos) != 2):
+        if mech and len(pos) > 1 or (not mech and len(pos) != 2) or (apply_a and not mech):
             raise ValueError
     except (ValueError, IndexError):
-        print("PM_EMBED_ERROR usage: project-map-embed.sh ROOT inv-<id> [--deadline S] | ROOT --mechanical [--deadline S]")
+        print("PM_EMBED_ERROR usage: project-map-embed.sh ROOT inv-<id> [--deadline S] | ROOT --mechanical [--deadline S] [--apply-answers]")
         return 1
     clock = C.Clock(deadline)
     try:
@@ -624,7 +698,7 @@ def main(argv):
             raise EmbedError("need an absolute project root")
         root = os.path.realpath(root).rstrip("/")
         if mech:
-            genstr, size, stale, notes = embed_mechanical(root, clock)
+            genstr, size, stale, notes = embed_mechanical(root, clock, apply_a)
         else:
             genstr, size, stale, notes = embed_normal(root, pos[1], clock)
         print("PM_EMBED_OK gen %s %d" % (genstr, size))

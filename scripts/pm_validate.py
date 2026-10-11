@@ -22,7 +22,7 @@ PART_ST = ("done", "in_progress", "stuck", "unknown")
 TONES = ("ok", "watch", "blocked")   # "stale" is set by the script (stale record), never by the model
 ACTORS = ("claude", "codex", "owner", "external")
 TOP_KEYS = {"generation", "project", "run", "watch", "repos", "headline", "parts", "current_phase", "criteria_updates",
-            "eta", "next_step", "decisions", "loops", "risks", "template_feedback", "since"}
+            "eta", "next_step", "decisions", "loops", "risks", "template_feedback", "since", "intent"}
 SCRIPT_OWNED = ("answer", "answered_by", "answered_at", "status", "raised_at", "frozen",
                 "closed_by", "closed_at", "overtaken_why", "overtaken_ref")
 OPEN_ST = ("open", "overdue")
@@ -516,8 +516,8 @@ def validate_judgement(J, raw_len, ctx):
     repos = snap.get("repos", [])
     if raw_len > 6144:
         v.e("judgement.out.json is %d bytes, hard limit 6144 (target 3072)" % raw_len)
-    if not v.obj(J, "judgement", ("generation", "project", "run", "headline", "parts", "current_phase", "next_step"),
-                 tuple(TOP_KEYS - {"generation", "project", "run", "headline", "parts", "current_phase", "next_step"})):
+    REQ = ("generation", "project", "run", "headline", "parts", "current_phase", "next_step", "intent")
+    if not v.obj(J, "judgement", REQ, tuple(TOP_KEYS - set(REQ))):
         if not isinstance(J, dict):
             return v.errs
     if J.get("generation") != ctx["inv_name"]:
@@ -624,6 +624,7 @@ def validate_judgement(J, raw_len, ctx):
                     v.e("next_step.unblocks references unknown part %r" % str(u)[:24])
     _decisions(v, J, ctx)
     _since(v, J, ctx)
+    _intent(v, J)
     if v.lst(J.get("loops", []), "loops", 0, 4):
         lseen = set()
         for lp in J.get("loops", []):
@@ -725,6 +726,16 @@ def _decisions(v, J, ctx):
                 v.e("decision %s is open: carry it, or close it with overtaken{why} once its resolves_when holds" % i)
             else:
                 v.e("decision %s is open and has no resolves_when: carry it unchanged, only the owner's answer closes it" % i)
+
+
+# ---------------------------------------------------------------- intent: the immediate objective (14.1)
+def _intent(v, J):
+    """judgement.intent (required on every UPDATE and FULL): {outcome, done_when}, <= 120 bytes each. The model never writes
+    `accepted` (the owner's record), exclusions or a hash: those are script-owned."""
+    it = J.get("intent")
+    if v.obj(it, "intent", ("outcome", "done_when")):
+        v.s(it["outcome"], "intent.outcome", 120)
+        v.s(it["done_when"], "intent.done_when", 120)
 
 
 # ---------------------------------------------------------------- since: what changed, what needs attention (13.2)
@@ -961,6 +972,29 @@ def build_since(snap, J, decisions, judged_seen):
     return out
 
 
+def _intent_view(rec, keys):
+    return {k: copy.deepcopy(rec[k]) for k in keys if k in rec}
+
+
+def build_intent(staged, final, model):
+    """state.intent (14.1, 14.3). `staged`: the intent of the STAGED snapshot (the accepted record the lifecycle had applied when
+    the judgement was staged); `final`: the intent after the late-answer reduction (the owner's record at publication);
+    `model`: judgement.intent. TARGET = the intention this judgement served, frozen from the staged input: the staged accepted
+    record if there was one, else the model's text with no exclusions. ACCEPTED = the final record. PROPOSED = the model's text
+    unless it says what the final accepted record says (exclusions are the record's own: the model cannot set them); with no
+    accepted record the model's text is the standing proposal, awaiting "confirm focus"."""
+    sacc = (staged or {}).get("accepted")
+    facc = (final or {}).get("accepted")
+    mo, md = model["outcome"], model["done_when"]
+    if isinstance(sacc, dict):
+        target = _intent_view(sacc, ("outcome", "done_when", "exclusions", "hash"))
+    else:
+        target = {"outcome": mo, "done_when": md, "exclusions": [], "hash": C.intent_hash(mo, md, [])}
+    mh = C.intent_hash(mo, md, facc.get("exclusions") if isinstance(facc, dict) else [])
+    proposed = None if (isinstance(facc, dict) and mh == facc.get("hash")) else {"outcome": mo, "done_when": md, "hash": mh}
+    return {"accepted": copy.deepcopy(facc) if isinstance(facc, dict) else None, "proposed": proposed, "target": target}
+
+
 def _release_unverified(S):
     for r in S.get("repos") or []:
         rel = r.get("release") if isinstance(r, dict) else None
@@ -1020,6 +1054,10 @@ def assurance(S):
         why.append("pack coverage unknown")
     else:
         why += omitted_work(seen)
+    it = S.get("intent")   # 3.5: a published accepted focus that is not the one the assessment served (a retried or partial run)
+    if isinstance(it, dict) and isinstance(it.get("accepted"), dict) \
+            and it["accepted"].get("hash") != (it.get("target") or {}).get("hash"):
+        why.append("focus changed after the assessment")
     return {"ok": not why, "why": why}
 
 
@@ -1051,6 +1089,8 @@ def build_state(ctx):
     open_ids = [d["id"] for d in decs if d["status"] == "overdue"]
     key = copy.deepcopy(snap["key"])
     key["expired_ids"] = sorted(open_ids)
+    intent = build_intent(ctx.get("staged_intent", snap.get("intent")), snap.get("intent"), J["intent"])
+    key["intent_hash"] = intent["target"]["hash"]   # rebased: the component now names the intention THIS judgement served
     parts = J["parts"]
     r0 = snap["repos"][0] if snap["repos"] else {}
     name = J["project"]["name"] or os.path.basename(root)
@@ -1081,6 +1121,7 @@ def build_state(ctx):
         "template_feedback": J.get("template_feedback", []), "kept": ctx.get("kept", []),
         "retired_ids": [], "retired_decisions": "",
     }
+    S["intent"] = intent
     S["changes"] = diff_changes(prev, S, t) if prev else []
     S["judged_seen"] = ctx.get("judged_seen")   # what the model saw of the staged snapshot (13.3); None = unknown
     S["since"] = build_since(snap, J, decs, S["judged_seen"])

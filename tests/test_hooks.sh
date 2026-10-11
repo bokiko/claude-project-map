@@ -456,6 +456,28 @@ if [ "$MAPPED" = 1 ]; then
   ok "H-prompt-deadline: returned before the 5 s hook timeout (${MS} ms)" $([ "$MS" -lt 5000 ] && echo 1 || echo 0)
   REAL_ENV=""; run_real prompt "$RR"
   eq "H-prompt-deadline: retry inside 10 min is silent" "" "$OUT"
+  # H-focus (14.3): the prompt hook's refresh NEVER applies owner answers. A pending F-set that exactly confirms the focus the last
+  # assessment served stays pending after it; only facts' own "focus confirmed" path (embed --apply-answers) consumes it.
+  python3 - "$RPM/cache.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d.pop("ack_attempt_at", None); json.dump(d, open(p, "w"))
+PY
+  python3 - "$RPM/state.json" >> "$RPM/answers.jsonl" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))["intent"]["target"]
+print(json.dumps({"id": "F-set", "answer": t["outcome"], "note": t["done_when"], "at": "2026-10-11T10:00:00+03:00", "by": "owner"}))
+PY
+  ANS0=$(cat "$RPM/answers.jsonl"); G3=$(cur_gen)
+  STATE_BEFORE=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["answers"]["applied"], d["intent"]["accepted"], d["judged_key"]["answers_count"])' "$RPM/state.json")
+  REAL_ENV=""; run_real prompt "$RR"
+  eq "H-focus: the prompt hook re-rendered the map (it published a generation)" "project-map: map re-rendered after a plugin update" "$CTX"
+  ok "H-focus: ... a new generation was added" $([ "$(cur_gen)" != "$G3" ] && echo 1 || echo 0)
+  eq "H-focus: ... the confirming F-set is still pending: applied, accepted and the judged key are as before" "$STATE_BEFORE" "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["answers"]["applied"], d["intent"]["accepted"], d["judged_key"]["answers_count"])' "$RPM/state.json")"
+  eq "H-focus: ... answers.jsonl was not touched" "$ANS0" "$(cat "$RPM/answers.jsonl")"
+  ok "H-focus: ... the map says it is behind (the line is a pending answer)" $([ "$(python3 -c 'import json,sys;print((json.load(open(sys.argv[1])).get("stale") or {}).get("why",""))' "$RPM/state.json")" = "1 pending answers" ] && echo 1 || echo 0)
+  VL=$(renv python3 "$RP/scripts/project-map-facts.py" "$RR" --no-stage)
+  eq "H-focus: facts (not the hook) applies the plain confirmation without a model" "NEEDS_REFRESH focus confirmed" "$VL"
+  ok "H-focus: ... applied 1 and the focus is accepted" $([ "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["answers"]["applied"], d["intent"]["accepted"]["line"])' "$RPM/state.json")" = "1 1" ] && echo 1 || echo 0)
 else
   echo "SKIP: H-prompt, H-prompt-deadline (scratch map not built)"
 fi

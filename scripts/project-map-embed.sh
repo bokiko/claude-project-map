@@ -1,5 +1,5 @@
 #!/bin/bash
-# project-map-embed.sh ROOT inv-<id> [--deadline S]   |   ROOT --mechanical [--deadline S]
+# project-map-embed.sh ROOT inv-<id> [--deadline S]   |   ROOT --mechanical [--deadline S] [--apply-answers]
 # Trusted helper (plugin scripts/ directory, not writable by the project-map agent). Thin entry point for
 # project-map-embed.py: validates the staged judgement, publishes one immutable generation (INTERFACES-3.2 1.3).
 # Output: PM_EMBED_OK gen <seq>-<id> <bytes> (exit 0) | SUPERSEDED ... (exit 4) | PM_EMBED_ERROR <why> (exit 1).

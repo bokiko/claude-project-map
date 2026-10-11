@@ -42,9 +42,13 @@ The project changed after Claude assessed it, possibly while the map was being b
 
 Open the choices on the page, then reply in Claude Code chat with the letter, such as `A` or `D-004=A`. Claude records the answer and refreshes the map. “Coming up” means the choice is not ready yet. Hard-rule decisions stay on hold until you answer, and the action itself still needs your explicit approval.
 
+## How do I set the focus?
+
+Each assessment ends with one proposed focus: the immediate objective the next step serves, and what "done" means for it. The brief (`focus: ... (proposed: say "confirm focus")`) and the page say it is only a proposal until you confirm it. Tell Claude **"confirm focus"** to make it yours, or **"the focus is X, done when Y"** to set your own; you can add up to three things that are out of scope, and a later "confirm focus" keeps them unless you say to drop them. Your words are stored as one `F-set` line in `.project-map/answers.jsonl`; the map never rewrites it and never changes your focus itself (it can only suggest a different one). Confirming exactly what the map proposed is applied without a model call and the next summary says `(confirmed)`; a different focus costs one ordinary update. Say **"handoff"** (or open the "Handoff" row on the page and press Copy) to get `.project-map/handoff.txt`: a short, bounded text for the next agent or session with the focus, what done means, what is out of scope, where the work stands, the next step, and what still needs you. It is context for the work, not permission: it always ends by saying that pushes, deletions, spending, deploys and infrastructure changes still need you.
+
 ## Where is my map, and why can’t I see it?
 
-Open `.project-map/index.html` inside your project folder in a browser. The text summary is `.project-map/brief.txt`. Folders beginning with a dot may be hidden by your file browser; ask Claude for the full path. If a refresh fails, the previous map is kept, so check the chat for errors before treating it as current.
+Open `.project-map/index.html` inside your project folder in a browser. The text summary is `.project-map/brief.txt`; the handoff for the next agent is `.project-map/handoff.txt`. Folders beginning with a dot may be hidden by your file browser; ask Claude for the full path. If a refresh fails, the previous map is kept, so check the chat for errors before treating it as current.
 
 ## How do I update?
 

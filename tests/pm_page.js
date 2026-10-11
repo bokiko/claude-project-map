@@ -2,6 +2,8 @@
 // pm_page.js: run the page JavaScript of a published index.html against a tiny DOM shim and print what the page says.
 //   node pm_page.js index.html [STATE_PATCH_JSON]   -> one JSON object on stdout
 // STATE_PATCH_JSON (optional) is shallow-merged over the embedded state first (used to test wording without a publish).
+// PM_PAGE_CLIP=ok|deny|missing|sync (optional): after loading, click the Handoff "Copy" button against a fake clipboard that
+// resolves, rejects, does not exist, or returns a non-promise, and report the label the page shows and what was selected.
 // No browser needed. The shim keeps only what the template uses; it records every element created, so a test can prove
 // that text from the repository never became markup (no <script>, no innerHTML).
 'use strict';
@@ -19,6 +21,7 @@ class El {
   constructor(tag) {
     this.tagName = String(tag).toUpperCase(); this.children = []; this.parent = null; this.attrs = {}; this.dataset = {};
     this.className = ''; this.hidden = false; this.style = {}; this._text = null; this.tabIndex = 0; this.title = ''; this.type = ''; this.open = false;
+    this.listeners = {};
   }
   get textContent() { return this._text !== null ? this._text : this.children.map(c => c.textContent).join(''); }
   set textContent(v) { this._text = String(v); this.children = []; }
@@ -27,7 +30,7 @@ class El {
   replaceChildren(...xs) { this.children = []; this._text = null; this.append(...xs); }
   after(n) { const i = this.parent.children.indexOf(this); n.parent = this.parent; this.parent.children.splice(i + 1, 0, n); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
-  addEventListener() {}
+  addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
   focus() {}
 }
 const root = new El('body'), byId = {};
@@ -40,11 +43,19 @@ function getElementById(id) {
   }
   return byId[id];
 }
+const clip = { written: null, selected: null };
+const mode = process.env.PM_PAGE_CLIP || '';
 const document = {
   title: '', getElementById, createTextNode: t => new Text(t), querySelectorAll: () => [],
   createElement: tag => { created.push(String(tag).toLowerCase()); return new El(tag); },
+  createRange: () => ({ selectNodeContents(n) { this.node = n; } }),
 };
-const ctx = { document, location: { search: '' }, URLSearchParams, console };
+const win = { getSelection: () => ({ removeAllRanges() { clip.selected = null; }, addRange(r) { clip.selected = r.node || null; } }) };
+const nav = {};
+if (mode === 'ok') nav.clipboard = { writeText: t => { clip.written = t; return Promise.resolve(); } };
+else if (mode === 'deny') nav.clipboard = { writeText: () => Promise.reject(new Error('NotAllowedError')) };
+else if (mode === 'sync') nav.clipboard = { writeText: t => { clip.written = t; } };
+const ctx = { document, location: { search: '' }, URLSearchParams, console, window: win, navigator: nav };
 const src = js.replace(/let state=null;try\{state=JSON\.parse\(document\.getElementById\('state'\)\.textContent\);\}catch\(e\)\{\}/,
   'let state=__STATE__;');
 if (src === js) { console.log(JSON.stringify({ error: 'template state line changed; update pm_page.js' })); process.exit(0); }
@@ -66,11 +77,30 @@ const since = getElementById('since');   // declared hidden in the markup; shown
 const snapRows = [];
 const walk = n => { if (n.className === 'snapshot-row') snapRows.push(n.children.map(c => c.textContent)); (n.children || []).forEach(walk); };
 walk(root);
-console.log(JSON.stringify({
-  error: err, pill: t('needs-pill'), count: t('decision-count'), note: t('decision-note'),
-  sinceHidden: since ? since.hidden : null, since: since && !since.hidden ? blocks(since) : [],
-  attention: since && !since.hidden ? since.children.filter(c => c.dataset && c.dataset.attention).map(c => c.dataset.attention) : [],
-  stale: root.children.filter(c => c.className === 'stale').map(c => c.textContent),
-  snapshot: snapRows, created: created, scripts: created.filter(x => x === 'script' || x === 'iframe').length,
-  tagline: t('tagline'),
-}));
+const all = [];
+const collect = n => { all.push(n); (n.children || []).forEach(collect); };
+collect(root);
+const ctxEl = byId['context'];
+const disclosures = ctxEl ? ctxEl.children.filter(c => c.tagName === 'DETAILS').map(c => c.children[0].textContent) : [];
+const pre = all.find(n => n.className === 'handoff-text');
+const btn = all.find(n => n.className === 'copy-btn');
+const note = all.find(n => n.className === 'copy-note');
+
+(async () => {
+  let copy = null;
+  if (mode && btn) {
+    for (const fn of btn.listeners.click || []) { try { fn({}); } catch (e) { err = err || String(e); } }
+    await new Promise(r => setTimeout(r, 25));
+    copy = { label: btn.textContent, note: note ? note.textContent : null, written: clip.written,
+             selected: clip.selected ? clip.selected.className : null };
+  }
+  console.log(JSON.stringify({
+    error: err, pill: t('needs-pill'), count: t('decision-count'), note: t('decision-note'),
+    sinceHidden: since ? since.hidden : null, since: since && !since.hidden ? blocks(since) : [],
+    attention: since && !since.hidden ? since.children.filter(c => c.dataset && c.dataset.attention).map(c => c.dataset.attention) : [],
+    focus: since && !since.hidden ? since.children.filter(c => c.dataset && c.dataset.focus).map(c => [c.dataset.focus, c.textContent]) : [],
+    stale: root.children.filter(c => c.className === 'stale').map(c => c.textContent),
+    snapshot: snapRows, created: created, scripts: created.filter(x => x === 'script' || x === 'iframe').length,
+    tagline: t('tagline'), disclosures: disclosures, handoff: pre ? pre.textContent : null, copyLabel: btn ? btn.textContent : null, copy: copy,
+  }));
+})();

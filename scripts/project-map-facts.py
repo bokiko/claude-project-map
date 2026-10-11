@@ -12,7 +12,10 @@ brief can say how far behind it is); the staging dir is created after it and bas
 run and --deadline (embed) is checked between steps, never inside a render that is already stalled.
 
 It writes only under ROOT/.project-map/: staging dirs (inv-<id>), cache.json, repaired stable symlinks and the sweep of
-abandoned dirs. A mechanical re-render (NEEDS_REFRESH) is delegated to project-map-embed.py --mechanical.
+abandoned dirs. A mechanical re-render (NEEDS_REFRESH) is delegated to project-map-embed.py --mechanical. The one refresh that
+applies owner answers is `NEEDS_REFRESH focus confirmed` (3.5.0, 14.3): the owner's F-set lines confirmed exactly the focus the last
+assessment served, so embed --mechanical --apply-answers consumes them without a model call; if embed declines it, facts collects
+again against the refreshed generation and stages the judgement as usual.
 """
 import os
 import re
@@ -71,10 +74,16 @@ def consistency(pm, gen):
 
 
 # ---------------------------------------------------------------- repair / sweep (under the publish lock)
+LATE_STABLE = ("handoff.txt",)   # stable paths that generations written before 3.5.0 do not contain
+
+
 def repair_links(pm, gen):
-    """The four stable symlinks must point at current/<name>. Returns True when something was repaired."""
+    """The five stable symlinks must point at current/<name> (a path the pinned generation does not contain, like handoff.txt in
+    a generation from before 3.5.0, gets none: it appears with the next publication). Returns True when something was repaired."""
     fixed = False
     for n in C.STABLE:
+        if n in LATE_STABLE and not os.path.exists(os.path.join(pm, C.gen_dir_name(gen), n)):
+            continue
         want = "current/" + n
         p = os.path.join(pm, n)
         try:
@@ -287,18 +296,20 @@ def make_staging(pm, root, prev, snap):
 
 
 # ---------------------------------------------------------------- mechanical re-render
-def mechanical(root, dl=8.0):
+def mechanical(root, dl=8.0, apply_answers=False):
+    """Run `embed --mechanical` -> (ok, error text, [PM_EMBED_NOTE texts]). apply_answers passes --apply-answers: ONLY the
+    `focus confirmed` path asks for it (the hooks and the stale-stamping refresh never do)."""
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    argv = [sys.executable, EMBED_PY, root, "--mechanical", "--deadline", "%.2f" % dl] + (["--apply-answers"] if apply_answers else [])
     try:
-        r = subprocess.run([sys.executable, EMBED_PY, root, "--mechanical", "--deadline", "%.2f" % dl], capture_output=True,
-                           text=True, timeout=dl + 10, env=env)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=dl + 10, env=env)
     except Exception as ex:   # noqa: BLE001
-        return False, type(ex).__name__
+        return False, type(ex).__name__, []
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     if r.returncode == 0 and any(ln.startswith("PM_EMBED_OK") for ln in lines):
-        return True, ""
+        return True, "", [ln[len("PM_EMBED_NOTE "):] for ln in lines if ln.startswith("PM_EMBED_NOTE ")]
     bad = next((ln for ln in lines if ln.startswith(("PM_EMBED_ERROR", "SUPERSEDED"))), "no output")
-    return False, C.trim(bad.replace("PM_EMBED_ERROR ", ""), 120)
+    return False, C.trim(bad.replace("PM_EMBED_ERROR ", ""), 120), []
 
 
 # ---------------------------------------------------------------- cache
@@ -333,8 +344,14 @@ def _release_view(repos):
             for r in repos or [] if isinstance(r, dict) and isinstance(r.get("release"), dict)}
 
 
-def decide(root, pm, prev, snap):
-    """-> (verdict, why). verdict in NEEDS_FULL | NEEDS_JUDGEMENT | NEEDS_REFRESH | NO_CHANGE."""
+FOCUS_CONFIRMED = "focus confirmed"
+
+
+def decide(root, pm, prev, snap, lines=None, fast=True):
+    """-> (verdict, why). verdict in NEEDS_FULL | NEEDS_JUDGEMENT | NEEDS_REFRESH | NO_CHANGE. `lines`: the complete lines of the
+    answers.jsonl image this snapshot was collected from; with fast=True and only answers_count moved, lines that confirm exactly
+    the focus the last assessment served are `NEEDS_REFRESH focus confirmed` (14.3: no model call). fast=False is the second
+    decision after embed declined that path."""
     if prev["kind"] == "none":
         return "NEEDS_FULL", "first map"
     if prev["kind"] == "legacy":
@@ -343,6 +360,11 @@ def decide(root, pm, prev, snap):
         return "NEEDS_FULL", prev["why"] or "invalid state"
     S = prev["state"]
     cmp = K.compare_keys(prev["judged_key"], snap["key"], snap)
+    if prev.get("replay"):
+        # an outstanding `--accept-answers` rebaseline (cache.json answers_accept for THIS generation): the rewritten file is replayed
+        # from scratch, and only a judgement consumes it (its decision answers, and the removal of an accepted focus). Neither the
+        # answer count nor the operative intent hash has to move for that to be true (14.7), so it is a reason of its own.
+        return "NEEDS_JUDGEMENT", "answers replayed" + ("; " + cmp["why"] if cmp["why"] else "")
     st = snap["status"]
     partial = st["coverage"] == "partial"
     if partial:
@@ -350,6 +372,9 @@ def decide(root, pm, prev, snap):
             return "NEEDS_JUDGEMENT", cmp["why"]
         return "NEEDS_REFRESH", "coverage partial %d/%d" % (st["covered"], st["total"])
     if cmp["moved"]:
+        if fast and lines is not None and cmp["moved"] == ["answers_count"] and not prev.get("unverified") \
+                and not (snap.get("answers") or {}).get("tail") and K.confirmation_only(S, lines, prev["applied"]):
+            return "NEEDS_REFRESH", FOCUS_CONFIRMED
         return "NEEDS_JUDGEMENT", cmp["why"]
     if prev.get("unverified"):
         return "NEEDS_REFRESH", "generation unverified"
@@ -398,41 +423,81 @@ def run_facts(root, budget, as_json, stage=True):
         hd += 2.0
     gt = 5.0 if budget else 20.0
     K.set_budget(t0 + budget if budget else None)
+
+    def collect_now(prev_, cache_, hd_, img):
+        try:
+            return K.collect(root, prev_, hd_, cache_, git_timeout=gt, image_out=img)
+        except K.GitCollectError as ex:
+            raise err("git_error: %s" % ex)
+        except K.PackOverflow:
+            raise err("pack over 8 KB")
+        except K.AnswersUnreadable as ex:
+            raise err(str(ex))
+        except K.AnswersRewritten:
+            me = os.path.join(HERE, "project-map-facts.py")
+            raise err("answers rewritten; run: python3 %s --accept-answers %s" % (me, root))
+
+    img = {}
+    tc0 = time.monotonic()
     try:
-        snap = K.collect(root, prev, hd, cache, git_timeout=gt)
+        snap = collect_now(prev, cache, hd, img)
     except K.BudgetOut:   # the best verdict available without the facts
         if prev["kind"] == "v4":
             return "NEEDS_REFRESH facts incomplete (deferred: budget)", None, None
         why = {"none": "first map", "legacy": "migrate"}.get(prev["kind"], prev.get("why") or "invalid state")
         return "NEEDS_FULL %s (deferred: budget)" % why, None, None
-    except K.GitCollectError as ex:
-        raise err("git_error: %s" % ex)
-    except K.PackOverflow:
-        raise err("pack over 8 KB")
-    except K.AnswersUnreadable as ex:
-        raise err(str(ex))
-    except K.AnswersRewritten:
-        me = os.path.join(HERE, "project-map-facts.py")
-        raise err("answers rewritten; run: python3 %s --accept-answers %s" % (me, root))
+    t_collect = time.monotonic() - tc0   # what ONE collection costs here (a second one must fit the budget that is left)
     if os.environ.get("PM_FACTS_DELAY_AFTER"):   # test hook: a slow collection must not break --budget
         time.sleep(float(os.environ["PM_FACTS_DELAY_AFTER"]))
     rem = (budget - (time.monotonic() - t0)) if budget else float("inf")   # --budget bounds the WHOLE run
     can_refresh = rem >= 1.0
     mdl = min(8.0, rem)
-    verdict, why = decide(root, pm, prev, snap)
+    verdict, why = decide(root, pm, prev, snap, img.get("lines"))
     inv = None
+    refreshed = False
+    if verdict == "NEEDS_REFRESH" and why == FOCUS_CONFIRMED and can_refresh:
+        # 14.3: the owner's F-set lines confirm exactly the focus the last assessment served. Embed re-validates the whole
+        # predicate under its lock on its own pinned generation and ONE read of answers.jsonl; if anything differs it publishes
+        # the ordinary refresh, leaves the lines pending and says so.
+        ok, e, notes = mechanical(root, mdl, apply_answers=True)
+        if not ok:
+            raise Out("REFRESH_FAILED " + (e or "unknown"), 3)
+        if any(n.startswith("answers not applied") for n in notes):
+            pending_why = "%d pending answers" % max(len((snap.get("answers") or {}).get("pending") or []), 1)
+            prev = K.load_prev(pm)   # the refreshed generation: the staged snapshot must contain the line that declined the path
+            if prev["kind"] != "v4":
+                raise err("map unreadable after refresh")
+            if os.environ.get("PM_FACTS_DELAY_AFTER_REFRESH"):   # test hook: the refresh used up the budget
+                time.sleep(float(os.environ["PM_FACTS_DELAY_AFTER_REFRESH"]))
+            rem2 = (budget - (time.monotonic() - t0)) if budget else float("inf")
+            if budget and rem2 < max(1.0, t_collect):   # a second collection is not affordable: no staging, the next run decides
+                return "NEEDS_JUDGEMENT %s (deferred: budget)" % pending_why, None, None
+            cache = cache_load(pm)   # the refresh persisted a newer watch cache than the one this process holds
+            img = {}
+            try:
+                snap = collect_now(prev, cache, time.monotonic() + (rem2 * 0.6 if budget else 30.0), img)
+            except K.BudgetOut:
+                return "NEEDS_JUDGEMENT %s (deferred: budget)" % pending_why, None, None
+            rem = (budget - (time.monotonic() - t0)) if budget else float("inf")
+            can_refresh = rem >= 1.0
+            mdl = min(8.0, rem)
+            verdict, why = decide(root, pm, prev, snap, img.get("lines"), fast=False)
+        else:
+            refreshed = True
     if verdict == "NEEDS_REFRESH":
-        if not can_refresh:   # out of budget: the best verdict without the refresh
+        if refreshed:
+            pass
+        elif not can_refresh:   # out of budget: the best verdict without the refresh
             why += " (deferred: budget)"
         else:
-            ok, e = mechanical(root, mdl)
+            ok, e, _notes = mechanical(root, mdl)
             if not ok:
                 raise Out("REFRESH_FAILED " + (e or "unknown"), 3)
     elif verdict in ("NEEDS_JUDGEMENT", "NEEDS_FULL"):
         if verdict == "NEEDS_JUDGEMENT":   # flag the page stale first: the brief must say how far behind it is
             want = {"judged_at": prev["state"].get("judged_at"), "commits_since": snap["commits"]["count"], "why": why}
             if prev["state"].get("stale") != want and can_refresh:
-                ok, _e = mechanical(root, mdl)
+                ok, _e, _n = mechanical(root, mdl)   # never applies answers: a staged snapshot must carry every line as pending
                 if ok:
                     prev = K.load_prev(pm)
                     if prev["kind"] != "v4":
@@ -452,12 +517,23 @@ def run_facts(root, budget, as_json, stage=True):
 
 
 def accept_answers(root):
+    """Re-baseline answers.jsonl after an intentional edit (6.7): the whole file is replayed from scratch against the current
+    decisions. 3.5.0: the replay also reduces the F-set lines through the one reducer, so the focus after it is the LAST F-set
+    line of the file, or none (a rewrite that removes every F-set line removes the accepted focus; the next judgement publishes
+    that). The result is stored next to applied / applied_hash in cache.json `answers_accept`."""
     pm = os.path.join(root, ".project-map")
     prev = K.load_prev(pm) if os.path.isdir(pm) else {"kind": "none"}
     if prev["kind"] != "v4":
         raise err("no published map to re-baseline")
+    try:
+        lines, _tail = K.read_answers_ex(pm)
+    except K.AnswersUnreadable as ex:
+        raise err(str(ex))
+    pending, _bad = K.parse_pending(lines)
+    it = {"accepted": None}
+    K.apply_answers({}, pending, it)
     cache = cache_load(pm)
-    cache["answers_accept"] = {"gen": prev["gen"], "applied": 0, "applied_hash": C.sha256_bytes(b""), "at": C.iso()}
+    cache["answers_accept"] = {"gen": prev["gen"], "applied": 0, "applied_hash": C.sha256_bytes(b""), "at": C.iso(), "accepted": it["accepted"]}
 
     def go():
         cur = cache_load(pm)
@@ -466,7 +542,9 @@ def accept_answers(root):
         return True
     if not locked(pm, go):
         raise err("another process holds the lock, retry")
-    return "ACCEPTED answers re-baselined for generation %s; run /project-map" % prev["gen"]
+    acc = it["accepted"]
+    return "ACCEPTED answers re-baselined for generation %s; focus after the replay: %s; run /project-map" % (
+        prev["gen"], "\"%s\" (line %d)" % (C.trim(acc["outcome"], 60), acc["line"]) if acc else "none (no F-set line)")
 
 
 def main(argv):

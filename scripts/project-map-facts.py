@@ -17,6 +17,7 @@ applies owner answers is `NEEDS_REFRESH focus confirmed` (3.5.0, 14.3): the owne
 assessment served, so embed --mechanical --apply-answers consumes them without a model call; if embed declines it, facts collects
 again against the refreshed generation and stages the judgement as usual.
 """
+import copy
 import os
 import re
 import shutil
@@ -325,7 +326,7 @@ def cache_save(pm, cache):
 
     def go():
         cur = cache_load(pm)
-        for k in ("watch_cache", "coverage_cursor"):
+        for k in ("watch_cache", "coverage_cursor", "fp_cache"):   # `evidence` is written by its own critical section (K.check_evidence), never here
             if k in cache:
                 cur[k] = cache[k]
         C.atomic_write(os.path.join(pm, "cache.json"), C.dumps(cur))
@@ -389,6 +390,12 @@ def decide(root, pm, prev, snap, lines=None, fast=True):
         return "NEEDS_REFRESH", "stale cleared"
     if _release_view(S.get("repos")) != _release_view(snap["repos"]):   # behind count, recent tags: display only
         return "NEEDS_REFRESH", "release facts changed"
+    # 3.6 (15.1): the published evidence view (checked, visited count, lost ids, unverified marks, an incomplete publication recheck) is
+    # a fact the scripts own; when the snapshot would change it and no key moved, the answer is a mechanical refresh, never a judgement
+    T = copy.deepcopy(S)
+    VAL.apply_evidence(T, snap["evidence"])
+    if VAL.evidence_state_view(T) != VAL.evidence_state_view(S):
+        return "NEEDS_REFRESH", "evidence status changed"
     at = C.parse_iso(S["identity"].get("snapshot_at"))
     if at is None or (C.now() - at).total_seconds() >= HOUR:
         return "NEEDS_REFRESH", "map older than 1 h"

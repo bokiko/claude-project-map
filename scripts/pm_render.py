@@ -74,10 +74,24 @@ def _line2(S):
     return l2 + (" \u00b7 " + q if q else "")
 
 
+def _revise_requested(S):
+    """15.3: the owner answered B ("revise the focus") to a drift question and has not said the new focus yet."""
+    d = (S.get("intent") or {}).get("drift") if isinstance(S.get("intent"), dict) else None
+    return isinstance(d, dict) and d.get("revise_requested") is True
+
+
+def _departure(S):
+    """15.2: state.fit when the model judged a DEPARTURE from the intention (concern shown by brief 5b, handoff 9b, the page)."""
+    f = S.get("fit")
+    if isinstance(f, dict) and f.get("verdict") == "departure" and isinstance(f.get("concern"), str) and f["concern"]:
+        return f
+    return None
+
+
 def brief(S):
     """<= 1000 bytes including the final newline, whole lines only, in the fixed display order of 13.6. When the lines do not
-    fit they are dropped by priority: tokens, git, the change lines (last first), the since line, attention, overtaken,
-    focus (6b, 3.5), attention, overtaken, stale / coverage (3.6 adds its line); then the decisions collapse into `+N more decisions`.
+    fit they are dropped by priority: tokens, git, the change lines (last first), the since line, focus (6b, 3.5), fit (5b, 3.6),
+    attention, overtaken, evidence lost (11b, 3.6), stale / coverage; then the decisions collapse into `+N more decisions`.
     Lines 1-3, 6 and the generation trailer are never dropped; line 2 is never cut mid-field (each field has its own cap)."""
     gen = S["generation"]
     trailer = "generation %s" % gen
@@ -100,8 +114,13 @@ def brief(S):
     foc = _focus_of(S)
     if foc:   # 14.5: the owner's confirmed focus, or the map's proposal with the words that confirm it
         l6b = "focus: %s (%s)" % (foc["outcome"], "confirmed" if foc["confirmed"] else 'proposed: say "confirm focus"')
+        if foc["confirmed"] and _revise_requested(S):   # 15.3: the owner answered B to a drift question; cleared by the next F-set
+            l6b = "focus: revision requested: say the new one"
     sn = S.get("since") if isinstance(S.get("since"), dict) else None
-    l5, l7, l8 = "", "", []
+    l5, l5b, l7, l8 = "", "", "", []
+    fit = _departure(S)
+    if fit:   # 15.4: line 5b, with line 5 in priority and dropped before it
+        l5b = "fit: %s" % C.trim(fit["concern"], 120)
     if sn:
         att = sn.get("attention") or {}
         if att and not (att.get("kind") == "decision" and att.get("id") in {i for i, _ in dl}):   # the D line already says it
@@ -123,6 +142,11 @@ def brief(S):
     cv = S.get("coverage") or {}
     if cv.get("coverage") == "partial":
         stale_l.append("coverage partial %d/%d" % (cv.get("covered", 0), cv.get("total", 0)))
+    lost = [e for e in ((S.get("evidence") or {}).get("lost") or []) if isinstance(e, dict) and isinstance(e.get("id"), str)]
+    l11b = ""
+    if lost:   # 15.1: the completion refs the scripts found gone, the first two by name
+        l11b = "evidence lost: " + ", ".join("%s (%s)" % (e["id"], C.trim(str(e.get("ref", "")), 40)) for e in lost[:2]) \
+            + (" +%d" % (len(lost) - 2) if len(lost) > 2 else "")
     tl = ""
     tot = ((S.get("usage") or {}).get("totals") or {})
     if tot.get("all") is not None:
@@ -131,9 +155,9 @@ def brief(S):
             tl += " · usage as of %s" % (str((S["usage"]).get("at") or "")[:16].replace("T", " ") or "an earlier run")
 
     # sections in display order; each droppable group is a list so its lines can go one by one, last first
-    sec = {"d": [t for _i, t in dl], "5": [l5] if l5 else [], "6b": [l6b] if l6b else [], "7": [l7] if l7 else [], "8": l8, "9": ov,
-           "10": [rl] if rl else [], "11": stale_l, "12": [tl] if tl else []}
-    order = ["d", "5", "6", "6b", "7", "8", "9", "10", "11", "12"]
+    sec = {"d": [t for _i, t in dl], "5": [l5] if l5 else [], "5b": [l5b] if l5b else [], "6b": [l6b] if l6b else [], "7": [l7] if l7 else [],
+           "8": l8, "9": ov, "10": [rl] if rl else [], "11": stale_l, "11b": [l11b] if l11b else [], "12": [tl] if tl else []}
+    order = ["d", "5", "5b", "6", "6b", "7", "8", "9", "10", "11", "11b", "12"]
 
     def render(more=0):
         out = [l1, l2, l3]
@@ -149,7 +173,7 @@ def brief(S):
     def size(lines):
         return sum(C.blen(x) + 1 for x in lines)
 
-    for key in ("12", "10", "8", "7", "6b", "5", "9", "11"):   # drop order of 13.6 / 14.5 (11b joins in 3.6)
+    for key in ("12", "10", "8", "7", "6b", "5b", "5", "9", "11b", "11"):   # drop order of 13.6 / 14.5 / 15.4
         while size(render()) > BRIEF_MAX and sec[key]:
             sec[key].pop()
     if size(render()) > BRIEF_MAX and sec["d"]:   # the existing `+N more decisions` collapsing
@@ -243,6 +267,8 @@ def handoff(S):
             l8.append("- %s \u00b7 %s" % (C.trim(c.get("text", ""), 120), "landed, not checked" if c.get("state") == "landed" else "uncommitted"))
     ns = S.get("next_step") or {}
     l9 = "Next: %s (%s): %s" % (C.trim(ns.get("title", ""), 80), ns.get("actor", ""), C.trim(ns.get("why", ""), 160))
+    fit = _departure(S)   # 15.4 line 9b: only a departure is worth a line in an assignment
+    l9b = "Fit%s: %s" % (" (against the map's proposal)" if fit.get("against") == "proposed" else "", C.trim(fit["concern"], 160)) if fit else ""
     ents = [_need_entry(d) for d in S.get("decisions") or [] if isinstance(d, dict) and d.get("id") in VAL.ask_ids(S.get("decisions") or [])]
     sev = {"high": 0, "med": 1, "low": 2}
     l11 = ["Open risk: %s %s" % (r.get("id", ""), C.trim(r.get("text", ""), 120))
@@ -250,7 +276,8 @@ def handoff(S):
     r0 = next((r for r in S.get("repos") or [] if isinstance(r, dict)), None)
     l12 = "Evidence: git: " + C.trim(r0["release"]["line"], 160) if r0 and isinstance(r0.get("release"), dict) and r0["release"].get("line") else ""
 
-    st = {"4": [l4] if l4 else [], "6": [l6], "7": [l7] if l7 else [], "8": l8, "9": [l9], "11": l11, "12": [l12] if l12 else [], "more": 0}
+    st = {"4": [l4] if l4 else [], "6": [l6], "7": [l7] if l7 else [], "8": l8, "9": [l9], "9b": [l9b] if l9b else [], "11": l11,
+          "12": [l12] if l12 else [], "more": 0}
 
     def line10():
         if not ents:
@@ -264,7 +291,7 @@ def handoff(S):
         out = [l1, l2, l3] + st["4"]
         if l5:
             out.append(l5)
-        out += st["6"] + st["7"] + st["8"] + st["9"]
+        out += st["6"] + st["7"] + st["8"] + st["9"] + st["9b"]
         if st["10"]:
             out += line10()
         return out + st["11"] + st["12"] + [HANDOFF_GUARD]
@@ -272,7 +299,7 @@ def handoff(S):
     def size():
         return sum(C.blen(x) + 1 for x in render())
 
-    for key in ("12", "11", "8", "7", "6"):   # 9b (3.6) sits between 7 and 6
+    for key in ("12", "11", "8", "7", "9b", "6"):   # 9b (3.6) sits between 7 and 6
         while size() > HANDOFF_MAX and st[key]:
             st[key].pop()
     while size() > HANDOFF_MAX and st["10"] and len(ents) - st["more"] > 1:   # collapse to `+N more`, then drop the whole line

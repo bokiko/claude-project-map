@@ -8,6 +8,7 @@ import copy
 import json
 import os
 import re
+import stat as _stat
 
 import pm_common as C
 import pm_git as G
@@ -22,9 +23,13 @@ PART_ST = ("done", "in_progress", "stuck", "unknown")
 TONES = ("ok", "watch", "blocked")   # "stale" is set by the script (stale record), never by the model
 ACTORS = ("claude", "codex", "owner", "external")
 TOP_KEYS = {"generation", "project", "run", "watch", "repos", "headline", "parts", "current_phase", "criteria_updates",
-            "eta", "next_step", "decisions", "loops", "risks", "template_feedback", "since", "intent"}
+            "eta", "next_step", "decisions", "loops", "risks", "template_feedback", "since", "intent", "fit"}
 SCRIPT_OWNED = ("answer", "answered_by", "answered_at", "status", "raised_at", "frozen",
-                "closed_by", "closed_at", "overtaken_why", "overtaken_ref")
+                "closed_by", "closed_at", "overtaken_why", "overtaken_ref", "intent_hash", "observations")
+REPAIRS_MAX = 12   # 15.1: the repair queue the pack lists, and the validation obligation, per judgement
+EVID_WHY = ("file missing", "line past end", "commit missing", "repo moved")   # the only reasons a completion ref can be lost for
+DRIFT_OPTIONS = [{"id": "A", "label": "Keep the focus"}, {"id": "B", "label": "Revise the focus (then say the new one)"},
+                 {"id": "C", "label": "Unclear, keep watching"}]   # 15.3: the only options a drift decision may have
 OPEN_ST = ("open", "overdue")
 CLOSED_ST = ("answered", "defaulted", "overtaken")   # a closed decision lives for exactly one generation
 
@@ -171,7 +176,11 @@ def ref_problem(root, repos, ref):
         prob, rp = _confined(root, rest, "file ref")
         if prob:
             return prob
-        if not os.path.isfile(rp):
+        try:   # 15.1/I3: the REFERENCED entry must be a regular file; a symlink (internal, dangling or escaping) is not evidence
+            regular = _stat.S_ISREG(os.lstat(os.path.join(root, rest)).st_mode) and os.path.isfile(rp)
+        except OSError:
+            regular = False
+        if not regular:
             return "file ref %s is not an existing regular file" % rest[:60]
         if line is not None and line > C.line_count(rp):
             return "file ref %s has no line %d" % (rest[:60], line)
@@ -207,6 +216,9 @@ def normalize_resolves_when(rw):
     out, errs = [], []
     for n, p in enumerate(rw, 1):
         w = "resolves_when[%d]" % n
+        if isinstance(p, dict) and p.get("kind") == "intent_changed":   # 15.3: bound by the script when a drift decision is raised
+            errs.append("%s kind intent_changed is bound by the script when a drift decision is raised; never write it" % w)
+            continue
         if not isinstance(p, dict) or p.get("kind") not in PRED_KINDS:
             errs.append("%s kind must be one of %s" % (w, "|".join(PRED_KINDS)))
             continue
@@ -321,6 +333,11 @@ def predicates_in_snapshot(root, snap, preds):
     errs = []
     for n, p in enumerate(preds, 1):
         w = "resolves_when[%d]" % n
+        if p["kind"] == "intent_changed":   # the script-bound drift predicate: the identity it waits to see replaced must be the accepted one
+            acc = (snap.get("intent") or {}).get("accepted")
+            if not (isinstance(acc, dict) and acc.get("hash") == p.get("hash") and isinstance(p.get("hash"), str)):
+                errs.append("%s intent_changed: hash is not the accepted focus' identity" % w)
+            continue
         if p["kind"] == "file":
             prob, _rp = _confined(root, p["path"], "path")
             if prob:
@@ -352,6 +369,8 @@ def _describe(p):
         return "%s in sync with its upstream" % p["repo"]
     if k == "commit":
         return "commit %s in %s" % (p["sha"], p["repo"])
+    if k == "intent_changed":
+        return "the confirmed focus is replaced by another"
     return "file %s %s" % (p["path"], "exists" if p["exists"] else "is absent")
 
 
@@ -359,6 +378,9 @@ def _eval(root, snap, p):
     """-> (holds, evidence, why). `why` is set only when the predicate could not be established (unknown), never for a
     plain "not yet": anything that cannot be established is false."""
     k = p["kind"]
+    if k == "intent_changed":   # 15.3: true once the accepted focus is not the one the question was about (another words, or none)
+        acc = (snap.get("intent") or {}).get("accepted")
+        return (acc.get("hash") if isinstance(acc, dict) else None) != p.get("hash"), "focus:changed", ""
     if k == "file":
         prob, rp = _confined(root, p["path"], "path")
         if prob:
@@ -432,7 +454,9 @@ def evaluate_resolves_when(root, snap, preds):
 
 
 # ---------------------------------------------------------------- plan
-def validate_plan(v, plan, root, repos, check_refs):
+def validate_plan(v, plan, root, repos, check_refs, exempt=()):
+    """exempt: {(criterion id, ref)} of UNLISTED known completion losses (15.1): a done criterion carried with exactly its prior
+    ref is not re-certified here, it stays unverified until it verifies again or a later batch repairs it."""
     if not v.obj(plan, "plan", ("schema", "generation", "origin", "phases")):
         return
     for m in C.unsafe_strings(plan, "plan"):
@@ -464,8 +488,19 @@ def validate_plan(v, plan, root, repos, check_refs):
             elif c.get("done") is True:
                 if not ref:
                     v.e("criterion %s is done but has no ref" % c.get("id"))
-                elif check_refs and (pr := ref_problem(root, repos, ref)):
+                elif check_refs and (c.get("id"), ref) not in exempt and (pr := ref_problem(root, repos, ref)):
                     v.e("criterion %s: %s" % (c.get("id"), pr))
+
+
+def check_plan_refs(v, plan, root, repos, exempt=()):
+    """15.1/I2: every done criterion of `plan` must carry a ref that resolves now, except the exact (id, ref) pairs of UNLISTED known
+    losses carried as they were. A FULL run calls this on the FINAL plan (the rebuilt plan with criteria_updates applied), because a
+    listed loss may be reopened or given a new ref by criteria_updates while plan.out.json still shows the old one."""
+    for ph in plan.get("phases") or []:
+        for c in ph.get("criteria") or []:
+            if isinstance(c, dict) and c.get("done") is True and isinstance(c.get("ref"), str) and c["ref"] \
+                    and (c.get("id"), c["ref"]) not in exempt and (pr := ref_problem(root, repos, c["ref"])):
+                v.e("criterion %s: %s" % (c.get("id"), pr))
 
 
 def apply_updates(plan, updates):
@@ -508,12 +543,369 @@ def derive_phases(plan, current_phase):
     return phs, cur, blocking
 
 
+# ---------------------------------------------------------------- completion evidence helpers (3.6.0, INTERFACES 15.1)
+def repairs_listed(ev):
+    """The repair queue (15.1): the first REPAIRS_MAX known completion losses, criteria before parts, by id. THE one list the pack
+    shows and the validation obliges (ev = snapshot.evidence; its `lost` is already in that order)."""
+    return [e for e in (ev or {}).get("lost") or [] if isinstance(e, dict)][:REPAIRS_MAX]
+
+
+def lost_unlisted(ev):
+    """{(id, ref)} of the known losses the queue did NOT list: they may be carried with exactly their prior ref (narrow exception)."""
+    listed = {(e["id"], e["ref"]) for e in repairs_listed(ev)}
+    return {(e["id"], e["ref"]) for e in (ev or {}).get("lost") or [] if isinstance(e, dict)} - listed
+
+
+def unverified_ids(S):
+    """Ids of the criteria and parts marked `unverified` in a state (criteria first, then parts, each by id)."""
+    ids = []
+    for ph in S.get("phases") or []:
+        ids += [c["id"] for c in (ph.get("criteria") or []) if isinstance(c, dict) and c.get("unverified") and isinstance(c.get("id"), str)] \
+            if isinstance(ph, dict) else []
+    ids += [p["id"] for p in S.get("parts") or [] if isinstance(p, dict) and p.get("unverified") and isinstance(p.get("id"), str)]
+    return sorted(ids, key=lambda i: (0 if CRIT_ID.match(i) else 1, i))
+
+
+def mark_unverified(S, lost, ok=None):
+    """Set `unverified: true` on every done criterion / done part whose (id, ref) is in `lost`. With `ok` (a set of (id, ref)) a mark
+    is also CLEARED, but only when that very ref verified ok again or the item is no longer a done completion (an unvisited or
+    unknown ref keeps its mark: it is cleared only when the ref verifies again, or the model resolves it)."""
+    def one(item, done):
+        key = (item.get("id"), item.get("ref"))
+        if done and key in lost:
+            item["unverified"] = True
+        elif ok is not None and item.get("unverified") and (not done or key in ok):
+            item.pop("unverified", None)
+    for ph in S.get("phases") or []:
+        for c in (ph.get("criteria") or []) if isinstance(ph, dict) else []:
+            if isinstance(c, dict):
+                one(c, c.get("done") is True)
+    for p in S.get("parts") or []:
+        if isinstance(p, dict):
+            one(p, p.get("status") == "done")
+
+
+def apply_evidence(T, ev):
+    """A mechanical refresh (and `decide`'s what-if): the state's evidence view and its marks follow the snapshot's facts. The view
+    is the snapshot's without the per-ref `ok` list; a stored publication `recheck` is replaced (the refresh made its own pass)."""
+    lost = {(e["id"], e["ref"]) for e in ev.get("lost") or []}
+    ok = {(e["id"], e["ref"]) for e in ev.get("ok") or []}
+    mark_unverified(T, lost, ok)
+    T["evidence"] = {k: copy.deepcopy(ev[k]) for k in ("checked", "n", "done", "lost", "unknown")}
+
+
+def evidence_state_view(S):
+    """What `decide` compares between the published state and the snapshot (15.1): the check status, how many refs were visited, the
+    lost ids, the unverified ids, and whether a publication recheck is still incomplete."""
+    ev = S.get("evidence") if isinstance(S, dict) else None
+    unv = tuple(unverified_ids(S)) if isinstance(S, dict) else ()
+    if not isinstance(ev, dict):
+        return (None, None, None, (), unv, False)
+    rc = ev.get("recheck")
+    return (ev.get("checked"), ev.get("n"), ev.get("done"), tuple(sorted(e.get("id") for e in ev.get("lost") or [] if isinstance(e, dict))),
+            unv, isinstance(rc, dict) and isinstance(rc.get("done"), int) and isinstance(rc.get("n"), int) and rc["done"] < rc["n"])
+
+
+def completion_items(plan, parts):
+    """The completion refs of a (final) plan and parts list: [(id, ref)] sorted."""
+    out = set()
+    for ph in (plan or {}).get("phases") or []:
+        for c in ph.get("criteria") or []:
+            if isinstance(c, dict) and c.get("done") is True and isinstance(c.get("ref"), str) and c["ref"]:
+                out.add((c["id"], c["ref"]))
+    for p in parts or []:
+        if isinstance(p, dict) and p.get("status") == "done" and isinstance(p.get("ref"), str) and p["ref"]:
+            out.add((p["id"], p["ref"]))
+    return sorted(out)
+
+
+def validated_now(J, snap, plan):
+    """{(id, ref)} the publication itself just checked with ref_problem: every part ref (a known loss carried under the exception
+    is not one of them), a criterion updated to done with a ref, and in a FULL run every done criterion of the rebuilt plan."""
+    lost = {(e["id"], e["ref"]) for e in (snap.get("evidence") or {}).get("lost") or []}
+    full = (J.get("run") or {}).get("type") == "FULL"
+    ups = {u["id"] for u in J.get("criteria_updates") or [] if isinstance(u, dict) and u.get("done") is True and u.get("ref")}
+    out = set()
+    for p in J.get("parts") or []:
+        if p.get("status") == "done" and isinstance(p.get("ref"), str) and (p["id"], p["ref"]) not in lost:
+            out.add((p["id"], p["ref"]))
+    for ph in plan.get("phases") or []:
+        for c in ph.get("criteria") or []:
+            if c.get("done") is True and isinstance(c.get("ref"), str) and c["ref"] and (c["id"] in ups or full) \
+                    and (c["id"], c["ref"]) not in lost:
+                out.add((c["id"], c["ref"]))
+    return out
+
+
+def build_evidence(snap, J, plan, recheck):
+    """state.evidence for a JUDGED publication (15.1), over the FINAL completion refs: what the staged pass found (lost / ok /
+    unknown by (id, ref)), what the publication validated just now (a repaired item with its new ref), and what the publication
+    recheck found (`recheck`: {done, n, lost: [{id, ref, why}], unknown: [(id, ref)]}). -> (view, lost set). Nothing the publication
+    checked is left out of the state."""
+    ev = snap.get("evidence") or {}
+    items = completion_items(plan, J.get("parts"))
+    staged_lost = {(e["id"], e["ref"]): e.get("why") for e in ev.get("lost") or []}
+    staged_ok = {(e["id"], e["ref"]) for e in ev.get("ok") or []}
+    staged_unknown = set(ev.get("unknown") or [])
+    new_lost = {(e["id"], e["ref"]): e.get("why") for e in (recheck or {}).get("lost") or []}
+    new_unknown = {tuple(x) for x in (recheck or {}).get("unknown") or []}
+    valid = validated_now(J, snap, plan)
+    lost, unknown, done, ok_pairs = [], [], 0, set()
+    for key in items:
+        if key in new_lost:
+            lost.append({"id": key[0], "ref": key[1], "why": new_lost[key] if new_lost[key] in EVID_WHY else "file missing"})
+        elif key in staged_lost:
+            lost.append({"id": key[0], "ref": key[1], "why": staged_lost[key] if staged_lost[key] in EVID_WHY else "file missing"})
+        elif key in new_unknown:
+            unknown.append(key[0])
+        elif key in valid or key in staged_ok:
+            ok_pairs.add(key)
+        elif key[0] in staged_unknown:
+            unknown.append(key[0])
+        else:
+            continue   # not visited yet
+        done += 1
+    lost.sort(key=lambda e: (0 if CRIT_ID.match(e["id"]) else 1, e["id"]))
+    view = {"checked": "complete" if done == len(items) and not unknown else "partial", "n": len(items), "done": done,
+            "lost": lost, "unknown": sorted(unknown)}
+    if recheck is not None:
+        view["recheck"] = {"done": recheck["done"], "n": recheck["n"]}
+    return view, {(e["id"], e["ref"]) for e in lost}, ok_pairs
+
+
+def state_repos(snap_repos, prev, items):
+    """state.repos for a JUDGED publication (J1): the collected rows, plus the git repositories the previous state already names that this
+    collection could not report as git (a nested repository it cannot enter is dropped or seen as a plain folder), for as long as a
+    carried completion ref is a commit. The kept row is marked `inaccessible` and has no release facts; it stays the pinned state's
+    record of that repository, so every later pass (judged or mechanical) keeps probing its recorded path until a probe succeeds or
+    establishes real removal (then the commit ref is a loss, a judgement repairs it and the row is not needed any more)."""
+    rows = [dict({k: r.get(k) for k in ("path", "vcs", "branch", "head", "head_at")},
+                 **({"release": r["release"]} if isinstance(r.get("release"), dict) else {})) for r in snap_repos]
+    if not any(isinstance(ref, str) and ref.startswith("commit:") for _i, ref in items):
+        return rows
+    git_now = {r["path"] for r in rows if r.get("vcs") == "git"}
+    keep = [r for r in (prev or {}).get("repos") or []
+            if isinstance(r, dict) and r.get("vcs") == "git" and isinstance(r.get("path"), str) and r["path"] not in git_now]
+    if not keep:
+        return rows
+    kp = {r["path"] for r in keep}
+    return [r for r in rows if r["path"] not in kp] + [
+        {"path": r["path"], "vcs": "git", "branch": r.get("branch"), "head": r.get("head"), "head_at": r.get("head_at"), "inaccessible": True}
+        for r in keep]
+
+
+def marked_pairs(S):
+    """{(id, ref)} of the done criteria and done parts a state marks `unverified`."""
+    out = set()
+    for ph in (S or {}).get("phases") or []:
+        for c in (ph.get("criteria") or []) if isinstance(ph, dict) else []:
+            if isinstance(c, dict) and c.get("unverified") and c.get("done") is True and isinstance(c.get("ref"), str):
+                out.add((c.get("id"), c["ref"]))
+    for p in (S or {}).get("parts") or []:
+        if isinstance(p, dict) and p.get("unverified") and p.get("status") == "done" and isinstance(p.get("ref"), str):
+            out.add((p.get("id"), p["ref"]))
+    return out
+
+
+def watch_moved_paths(snap):
+    """Watched paths whose hash moved against the judged key (snapshot prev_key). A path hashed only partially on either side
+    is not a move (compare_keys treats it the same way), and neither is a path the judged key did not have."""
+    jw = (snap.get("prev_key") or {}).get("watch_hashes") if isinstance(snap.get("prev_key"), dict) else None
+    nw = (snap.get("key") or {}).get("watch_hashes") or {}
+    if not isinstance(jw, dict):
+        return []
+    return sorted(q for q in nw if q in jw and "partial" not in (jw[q], nw[q]) and jw[q] != nw[q])
+
+
+# ---------------------------------------------------------------- fit against the intention (3.6.0, INTERFACES 15.2)
+FIT_VERDICTS = ("consistent", "departure", "unknown")
+
+
+def fit_required(snap):
+    """`judgement.fit` is REQUIRED iff the pack carries an intent (accepted, or the model's own standing proposal) and a baseline
+    (`since` not null); absent otherwise."""
+    it = snap.get("intent") or {}
+    return snap.get("since") is not None and bool(it.get("accepted") or it.get("proposed"))
+
+
+def pack_observations(snap, pack):
+    """What the model could SEE of the work, from the pack it read (never from the live files): the commit items it listed
+    ({(repo, h7): oid40}, full ids from the staged snapshot), the dirty paths it listed, and the watched single files whose hash
+    moved since the judged key that it still lists. A missing pack supplies nothing."""
+    out = {"commits": {}, "dirty": set(), "watch": set()}
+    if not isinstance(pack, dict):
+        return out
+    oids = snap.get("commit_oids") or {}
+    for d in (pack.get("commits") or {}).get("days") or []:
+        for i in (d.get("items") or []) if isinstance(d, dict) else []:
+            if isinstance(i, dict) and isinstance(i.get("r"), str) and isinstance(i.get("h"), str):
+                oid = oids.get("%s|%s" % (i["r"], i["h"]))
+                if isinstance(oid, str) and re.fullmatch(r"[0-9a-f]{40}", oid):
+                    out["commits"][(i["r"], i["h"])] = oid
+    out["dirty"] = {os.path.normpath(x) for x in pack.get("dirty_paths") or [] if isinstance(x, str) and x}
+    files = {w.get("path") for w in snap.get("watch") or [] if isinstance(w, dict) and w.get("kind") == "file"}
+    moved = set(watch_moved_paths(snap))
+    for w in pack.get("watch") or []:
+        wp = w.get("path") if isinstance(w, dict) else w
+        if isinstance(wp, str) and wp in files and wp in moved:
+            out["watch"].add(os.path.normpath(wp))
+    return out
+
+
+ACK_REFS_MAX = 6   # 15.3: how many already-acknowledged refs the pack names
+
+
+def acknowledged_refs(snap, pack, limit=ACK_REFS_MAX):
+    """K1 (15.3): the refs in `pack` (the pack as it stands) that the owner has ALREADY acknowledged, in the exact string form the pack
+    lists them, so the model can tell which of its evidence is new material without guessing: a pack-listed commit as
+    `commit:<sha7>` when its (repository, oid) identity is in `drift.acknowledged.observations`; a pack-listed dirty path or moved
+    watch file as `file:<path>` (the string the pack uses) when its FROZEN fingerprint is verified and `file:<path>:<fp>` is
+    acknowledged (a file that changed since is new evidence and is not listed). At most `limit`, commits first, in pack order."""
+    ack = (((snap.get("intent") or {}).get("drift") or {}).get("acknowledged") or {}).get("observations")
+    if not isinstance(ack, list) or not ack or not isinstance(pack, dict):
+        return []
+    ack = {o for o in ack if isinstance(o, str)}
+    obs = pack_observations(snap, pack)
+    out = []
+    for dd in (pack.get("commits") or {}).get("days") or []:
+        for i in (dd.get("items") or []) if isinstance(dd, dict) else []:
+            oid = obs["commits"].get((i.get("r"), i.get("h"))) if isinstance(i, dict) else None
+            if oid and "commit:%s:%s" % (i["r"], oid) in ack and "commit:%s" % i["h"] not in out:
+                out.append("commit:%s" % i["h"])
+    names = [x for x in pack.get("dirty_paths") or [] if isinstance(x, str)] + \
+        [(w.get("path") if isinstance(w, dict) else w) for w in pack.get("watch") or []]
+    for raw in names:
+        if not isinstance(raw, str) or not raw:
+            continue
+        path = os.path.normpath(raw)
+        fp = (snap.get("file_fp") or {}).get(path)
+        if (path in obs["dirty"] or path in obs["watch"]) and isinstance(fp, dict) and fp.get("status") == "verified" \
+                and "file:%s:%s" % (path, fp.get("fp")) in ack and "file:%s" % raw not in out:
+            out.append("file:%s" % raw)
+    return out[:limit]
+
+
+def resolve_observation(ref, snap, pack):
+    """A model-written evidence ref -> (identity, None) or (None, problem). Identities are `commit:<repo>:<oid40>` and
+    `file:<path>:<fp>` (INTERFACES 15.2): the commit from the pack's listed items (the oid from the staged snapshot), the file's
+    content fingerprint from the snapshot's `file_fp` frozen at collection, so a file that changed while the judgement was
+    written keeps the identity it had when the pack was staged. A deleted, unreadable or non-regular file has none."""
+    if not isinstance(ref, str):
+        return None, "must be a string"
+    obs = pack_observations(snap, pack)
+    if ref.startswith("commit:"):
+        sha = ref[7:]
+        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            return None, "commit ref must be 7-40 hex characters"
+        hits = sorted({(r, oid) for (r, _h), oid in obs["commits"].items() if oid.startswith(sha)})
+        if not hits:
+            return None, "commit %s is not one of the commits the pack listed" % sha
+        if len(hits) > 1:
+            return None, "commit %s matches several commits of the pack; write more characters" % sha
+        return "commit:%s:%s" % hits[0], None
+    if ref.startswith("file:"):
+        rest = ref[5:]
+        m = re.match(r"^(.*):([0-9]+)$", rest)
+        if m:
+            rest = m.group(1)   # a line number is detail for the reader, never part of the identity
+        if not rest or rest.startswith("/") or ".." in rest.split("/"):
+            return None, "file ref must be a relative path inside the project"
+        path = os.path.normpath(rest)
+        if path not in obs["dirty"] and path not in obs["watch"]:
+            return None, "file %s is not a changed file the pack listed (dirty_paths, or a watched file that moved)" % path
+        fp = (snap.get("file_fp") or {}).get(path)
+        if not (isinstance(fp, dict) and fp.get("status") == "verified" and isinstance(fp.get("fp"), str)):
+            return None, "file %s has no content identity (deleted, unreadable, a directory or a link)" % path
+        return "file:%s:%s" % (path, fp["fp"]), None
+    return None, "ref must start with commit: or file:"
+
+
+def _fit(v, J, ctx):
+    """judgement.fit (15.2): {verdict, concern, evidence, exclusion}. Computes ctx["fit_res"] = {verdict, observations, exclusion,
+    against} for the decision gate and the state."""
+    snap = ctx["snap"]
+    f = J.get("fit")
+    ctx["fit_res"] = None
+    if not fit_required(snap):
+        if f is not None:
+            v.e("fit must be absent or null: this pack carries no intent to compare with, or no previous assessment")
+        return
+    if f is None:
+        v.e("fit is required: this pack carries an intent and a baseline (fit{verdict: consistent|departure|unknown[, concern, evidence[1-3], exclusion]})")
+        return
+    if not v.obj(f, "fit", ("verdict",), ("concern", "evidence", "exclusion")) or not v.one_of(f["verdict"], "fit.verdict", FIT_VERDICTS):
+        return
+    acc = (snap.get("intent") or {}).get("accepted")
+    res = {"verdict": f["verdict"], "observations": [], "exclusion": None, "against": "accepted" if isinstance(acc, dict) else "proposed"}
+    if f["verdict"] != "departure":
+        extra = [k for k in ("concern", "evidence", "exclusion") if k in f]
+        if extra:
+            v.e("fit.%s belongs to a departure only: %s carries no concern, evidence or exclusion" % (extra[0], f["verdict"]))
+        else:
+            ctx["fit_res"] = res
+        return
+    if "concern" not in f:
+        v.e("fit.concern is required for a departure")
+    else:
+        v.s(f["concern"], "fit.concern", 160)
+    obs = []
+    ev = f.get("evidence")
+    if ev is None:
+        v.e("fit.evidence is required for a departure: 1..3 refs to observations the pack supplied")
+    elif v.lst(ev, "fit.evidence", 1, 3):
+        for n, ref in enumerate(ev, 1):
+            ident, prob = resolve_observation(ref, snap, ctx.get("pack"))
+            if prob:
+                v.e("fit.evidence[%d]: %s (fit evidence must be an observation the pack supplied)" % (n, prob))
+            elif ident in obs:
+                v.e("fit.evidence[%d] repeats an observation already listed" % n)
+            else:
+                obs.append(ident)
+    if "exclusion" in f:
+        ex = (acc or {}).get("exclusions") or []
+        if not v.integer(f["exclusion"], "fit.exclusion"):
+            pass
+        elif f["exclusion"] >= len(ex):
+            v.e("fit.exclusion %d is not an index into the owner's exclusions (%d)" % (f["exclusion"], len(ex)))
+        else:
+            res["exclusion"] = f["exclusion"]
+    res["observations"] = sorted(obs)
+    ctx["fit_res"] = res
+
+
+def _repairs(v, J, ctx):
+    """15.1 repair obligations: every LISTED completion loss must be resolved by this judgement, against the FINAL plan (the carried
+    or rebuilt plan with criteria_updates applied; a criterion that is gone is resolved by removal): a criterion done:false or
+    done:true with a NEW ref (which the ordinary checks have already shown to resolve), a part not done or done with a new ref."""
+    listed = repairs_listed(ctx["snap"].get("evidence"))
+    if not listed:
+        return
+    plan = ctx["plan"]
+    idx = {c["id"]: dict(c) for ph in (plan.get("phases") or []) for c in (ph.get("criteria") or []) if isinstance(c, dict) and "id" in c} \
+        if isinstance(plan, dict) else {}
+    for u in J.get("criteria_updates") or []:
+        if isinstance(u, dict) and u.get("id") in idx and isinstance(u.get("done"), bool):
+            idx[u["id"]].update(done=u["done"], ref=u.get("ref") or None)
+    parts = {p["id"]: p for p in J.get("parts") or [] if isinstance(p, dict) and isinstance(p.get("id"), str)}
+    for e in listed:
+        i, ref = e["id"], e["ref"]
+        item = idx.get(i) if CRIT_ID.match(i) else parts.get(i)
+        if item is None:
+            continue   # removed from the final plan / parts: resolved by removal
+        done = item.get("done") is True if CRIT_ID.match(i) else item.get("status") == "done"
+        if done and item.get("ref") == ref:
+            v.e("%s completion evidence is lost (%s: %s): %s, or give a new ref that resolves" % (
+                i, e.get("why", "file missing"), C.trim(ref, 60),
+                "set it done:false in criteria_updates" if CRIT_ID.match(i) else "set the part's status to something other than done"))
+
+
 # ---------------------------------------------------------------- judgement
 def validate_judgement(J, raw_len, ctx):
     """ctx: root, snap, plan (the plan updates apply to), prev (state|None), full (bool). -> list of error strings."""
     v = V()
     root, snap, plan, prev = ctx["root"], ctx["snap"], ctx["plan"], ctx["prev"]
     repos = snap.get("repos", [])
+    lost_carry = lost_unlisted(snap.get("evidence"))
     if raw_len > 6144:
         v.e("judgement.out.json is %d bytes, hard limit 6144 (target 3072)" % raw_len)
     REQ = ("generation", "project", "run", "headline", "parts", "current_phase", "next_step", "intent")
@@ -569,7 +961,8 @@ def validate_judgement(J, raw_len, ctx):
             v.one_of(p["status"], "part %s status" % p.get("id"), PART_ST)
             if "line" in p:
                 v.s(p["line"], "part %s line" % p.get("id"), 100, 0)
-            if "ref" in p and p["ref"] is not None:
+            carried_loss = p.get("status") == "done" and isinstance(p.get("ref"), str) and (p.get("id"), p["ref"]) in lost_carry
+            if "ref" in p and p["ref"] is not None and not carried_loss:   # 15.1: an unlisted known loss may be carried as it was
                 pr_ = ref_problem(root, repos, p["ref"])
                 if pr_:
                     v.e("part %s: %s" % (p.get("id"), pr_))
@@ -622,6 +1015,8 @@ def validate_judgement(J, raw_len, ctx):
             for u in ns.get("unblocks", []):
                 if u not in pids:
                     v.e("next_step.unblocks references unknown part %r" % str(u)[:24])
+    _fit(v, J, ctx)   # before the decisions and the attention: both read ctx["fit_res"]
+    _repairs(v, J, ctx)
     _decisions(v, J, ctx)
     _since(v, J, ctx)
     _intent(v, J)
@@ -665,13 +1060,14 @@ def _decisions(v, J, ctx):
     in_prev = {d["id"] for d in (prev or {}).get("decisions", []) if isinstance(d, dict)}
     seen = set()
     sd = {x["id"]: x for x in ctx["snap"].get("decisions", []) if isinstance(x, dict) and isinstance(x.get("id"), str)}
+    n_new_drift = 0
     for d in decs:
         if isinstance(d, dict):
             for k in SCRIPT_OWNED:
                 if k in d:
                     v.e("decision %s: %s is owned by the script and must not be supplied" % (d.get("id"), k))
         if not v.obj(d, "decision", ("id", "q", "options", "default"),
-                     ("recommended", "hard_rule", "deadline", "ready", "overtaken", "resolves_when") + SCRIPT_OWNED):
+                     ("recommended", "hard_rule", "deadline", "ready", "overtaken", "resolves_when", "about") + SCRIPT_OWNED):
             continue
         did = v.ident(d["id"], "decision", DEC_ID, seen)
         if did and did in retired and did not in in_prev:
@@ -697,14 +1093,34 @@ def _decisions(v, J, ctx):
         if d.get("deadline") is not None and C.parse_iso(d["deadline"]) is None:
             v.e("%s: deadline must be an ISO timestamp or null" % w)
         staged = sd.get(d["id"])
+        # 15.3 `about`: a decision may say it is about drift (the only value). It is fixed when the decision is raised: a carried
+        # decision repeats it unchanged (adding or dropping it later is refused), and a drift decision is bound by the script.
+        if (d.get("about") if "about" in d else None) not in (None, "drift"):
+            v.e('%s: about must be "drift" (the only value)' % w)
+        if staged is not None and (d.get("about") or None) != (staged.get("about") or None):
+            v.e("%s: about is fixed when the decision is raised; repeat it unchanged" % w)
+        is_drift = d.get("about") == "drift"
+        if is_drift:
+            if d.get("options") != DRIFT_OPTIONS:
+                v.e("%s: a drift decision's options are exactly %s" % (w, "; ".join("%s %s" % (o["id"], o["label"]) for o in DRIFT_OPTIONS)))
+            if d.get("default") != "hold":
+                v.e("%s: a drift decision's default is hold" % w)
+            if staged is None:
+                n_new_drift += 1
+                _drift_gate(v, w, ctx, sd, n_new_drift)
         if "resolves_when" in d:
-            norm, errs = normalize_resolves_when(d["resolves_when"])
-            if staged is not None:   # a carried decision: its closure predicate was fixed when it was raised
-                if errs or norm != strip_tids(staged.get("resolves_when") or []):
-                    v.e("%s: resolves_when is fixed when the decision is raised; it cannot be added or changed later" % w)
+            if is_drift and staged is None:
+                v.e("%s: the closure predicate of a drift decision is bound by the script when it is raised; do not write resolves_when" % w)
+            elif staged is not None and d["resolves_when"] == strip_tids(staged.get("resolves_when") or []):
+                pass   # a carried decision repeats the predicate it was raised with (the pack shows it; a script-bound one included)
             else:
-                for m in errs or predicates_in_snapshot(ctx["root"], ctx["snap"], norm):
-                    v.e("%s %s" % (w, m))
+                norm, errs = normalize_resolves_when(d["resolves_when"])
+                if staged is not None:   # a carried decision: its closure predicate was fixed when it was raised
+                    if errs or norm != strip_tids(staged.get("resolves_when") or []):
+                        v.e("%s: resolves_when is fixed when the decision is raised; it cannot be added or changed later" % w)
+                else:
+                    for m in errs or predicates_in_snapshot(ctx["root"], ctx["snap"], norm):
+                        v.e("%s %s" % (w, m))
         if "overtaken" in d:
             ov = d["overtaken"]
             if v.obj(ov, w + " overtaken", ("why",), ("ref",)) and v.s(ov["why"], w + " overtaken.why", 120):
@@ -728,6 +1144,36 @@ def _decisions(v, J, ctx):
                 v.e("decision %s is open and has no resolves_when: carry it unchanged, only the owner's answer closes it" % i)
 
 
+def _drift_gate(v, w, ctx, staged_decisions, n_new):
+    """15.3 eligibility of a NEW drift decision, computed from the effective staged drift state and THIS judgement's fit: a confirmed
+    focus exists AND fit.verdict is departure AND (a second departure on distinct new work, or an owner exclusion is named) AND no
+    drift decision is open AND the concern is not acknowledged (the observations hold identities the owner has not acknowledged:
+    new material evidence, not new wording or a re-spelled ref). A carried decision is not gated: it stays legal until answered."""
+    snap = ctx["snap"]
+    it = snap.get("intent") or {}
+    acc, dr = it.get("accepted"), it.get("drift") or {}
+    fr = ctx.get("fit_res") or {}
+    why = []
+    if not isinstance(acc, dict):
+        why.append("there is no confirmed focus to drift from")
+    if fr.get("verdict") != "departure":
+        why.append("fit.verdict is not departure")
+    elif isinstance(acc, dict):
+        new_work = C.drift_new_work(dr, (snap.get("key") or {}).get("heads"), (snap.get("since") or {}).get("commits", 0))
+        if not ((dr.get("streak", 0) >= 1 and new_work) or fr.get("exclusion") is not None):
+            why.append("it needs a second departure on distinct new work (a streak of 1 and new commits since the last counted departure) "
+                       "or a fit.exclusion naming one of the owner's exclusions")
+        ack = dr.get("acknowledged")
+        if isinstance(ack, dict) and not (set(fr.get("observations") or []) - set(ack.get("observations") or [])):
+            why.append("the owner already acknowledged these observations; only new material evidence re-raises it")
+    if any(isinstance(x, dict) and x.get("about") == "drift" and x.get("status") in OPEN_ST for x in staged_decisions.values()):
+        why.append("a drift decision is already open")
+    if n_new > 1:
+        why.append("only one new drift decision per judgement")
+    if why:
+        v.e("%s: a drift decision is not allowed here: %s" % (w, "; ".join(why)))
+
+
 # ---------------------------------------------------------------- intent: the immediate objective (14.1)
 def _intent(v, J):
     """judgement.intent (required on every UPDATE and FULL): {outcome, done_when}, <= 120 bytes each. The model never writes
@@ -739,7 +1185,7 @@ def _intent(v, J):
 
 
 # ---------------------------------------------------------------- since: what changed, what needs attention (13.2)
-SINCE_KINDS = ("decision", "continue", "waiting", "unchecked")
+SINCE_KINDS = ("decision", "continue", "waiting", "unchecked", "drift")   # 3.6: drift only with fit.verdict == departure
 CHANGE_STATES = ("landed", "uncommitted")
 
 
@@ -824,6 +1270,8 @@ def _since(v, J, ctx):
                 v.e("since.attention.id %s is not an open decision that needs the owner (%s)" % (
                     aid, "open and ready: " + ", ".join(must) if must else "none is open and ready in this pack"))
         elif kind_ok:
+            if att["kind"] == "drift" and (ctx.get("fit_res") or {}).get("verdict") != "departure":
+                v.e("since.attention.kind drift needs fit.verdict departure")
             if "id" in att:
                 v.e("since.attention.id must be absent unless kind is decision")
             if must:
@@ -884,7 +1332,7 @@ def diff_changes(prev, S, t):
     return out[:8]
 
 
-def merge_decisions(J, snap, prev, root=None):
+def merge_decisions(J, snap, prev, root=None, drift=None):
     """Model text for open/overdue decisions, script copy for answered/defaulted ones (6.4 freezing). A decision the model
     closes with overtaken{why} becomes status "overtaken" (script-owned, one generation, like answered): the record is a
     verbatim copy of the STAGED decision, the model's text for that id is ignored apart from overtaken.why, and the
@@ -892,6 +1340,8 @@ def merge_decisions(J, snap, prev, root=None):
     sd = {d["id"]: d for d in snap["decisions"]}
     pd = {d["id"]: d for d in (prev or {}).get("decisions", [])}
     t = snap["facts_at"]
+    # drift (3.6, 15.3): a NEW drift decision gets its script-owned fields from `drift` = {hash, observations}, the accepted
+    # identity it is about and the observations of THIS judgement's fit; a carried one keeps the staged copy's
     out, seen = [], set()
     for m in J.get("decisions", []):
         i = m["id"]
@@ -912,13 +1362,18 @@ def merge_decisions(J, snap, prev, root=None):
                 out.append(d)
                 continue
         d = {"recommended": None, "hard_rule": None, "deadline": None, "ready": True}
-        d.update({k: copy.deepcopy(m[k]) for k in ("id", "q", "options", "recommended", "default", "hard_rule", "deadline", "ready") if k in m})
+        d.update({k: copy.deepcopy(m[k]) for k in ("id", "q", "options", "recommended", "default", "hard_rule", "deadline", "ready", "about") if k in m})
         if d["deadline"] is not None:
             d["deadline"] = C.iso(C.parse_iso(d["deadline"]))
         if s is not None and s["status"] == "overdue" and (s.get("hard_rule") or s.get("ready") is False):
             d["hard_rule"], d["default"], d["ready"] = s.get("hard_rule"), "hold", s.get("ready", True)
         rw = s.get("resolves_when") if s is not None else \
             (bind_tids(snap, normalize_resolves_when(m["resolves_when"])[0] or []) if "resolves_when" in m else None)
+        if s is not None and s.get("about") == "drift":
+            d["about"], d["intent_hash"], d["observations"] = "drift", s.get("intent_hash"), copy.deepcopy(s.get("observations") or [])
+        elif s is None and d.get("about") == "drift" and drift:
+            d["intent_hash"], d["observations"] = drift["hash"], list(drift["observations"])
+            rw = [{"kind": "intent_changed", "hash": drift["hash"]}]   # bound by the script at raise (15.3)
         if rw:
             d["resolves_when"] = copy.deepcopy(rw)
         d["status"] = s["status"] if s is not None else "open"
@@ -995,6 +1450,31 @@ def build_intent(staged, final, model):
     return {"accepted": copy.deepcopy(facc) if isinstance(facc, dict) else None, "proposed": proposed, "target": target}
 
 
+def build_drift(staged, final, fit_res, snap):
+    """state.intent.drift at a JUDGED publication (15.2). `staged`: the intent of the staged snapshot (its drift record is the
+    EFFECTIVE one: the lifecycle had already applied the owner's lines); `final`: the intent after any late-answer reduction.
+    A late F-set that changed the accepted identity left a fresh record (the already written fit is published as judged and does
+    not touch it). Otherwise, with a fit judged against the accepted focus: a departure counts (streak + 1, the heads it saw) iff the
+    baseline counted commits and some repository head differs from the last counted departure's; consistent or unknown resets the
+    streak. -> the record, or None while no focus is confirmed."""
+    acc = (final or {}).get("accepted")
+    if not isinstance(acc, dict):
+        return None
+    d = copy.deepcopy((final or {}).get("drift"))
+    if not (isinstance(d, dict) and d.get("hash") == acc.get("hash")):
+        return C.new_drift(acc["hash"])
+    sacc = (staged or {}).get("accepted")
+    if fit_res and isinstance(sacc, dict) and sacc.get("hash") == acc.get("hash") and fit_res.get("against") == "accepted":
+        if fit_res["verdict"] == "departure":
+            heads = (snap.get("key") or {}).get("heads") or {}
+            if C.drift_new_work(d, heads, (snap.get("since") or {}).get("commits", 0)):
+                d["streak"] += 1
+                d["heads"] = {r: h for r, h in heads.items() if isinstance(h, str) and h}
+        else:
+            d["streak"] = 0
+    return d
+
+
 def _release_unverified(S):
     for r in S.get("repos") or []:
         rel = r.get("release") if isinstance(r, dict) else None
@@ -1044,6 +1524,15 @@ def assurance(S):
         why.append("git error")
     if _release_unverified(S):
         why.append("tags unverified")
+    ev = S.get("evidence")   # 3.6 (15.1): every completion ref visited and none unknown, no unverified item, the publication recheck complete
+    if not isinstance(ev, dict) or ev.get("checked") != "complete":
+        why.append("evidence check incomplete")
+    unv = unverified_ids(S)
+    if unv:
+        why.append(C.trim("%s unverified%s" % (unv[0], " +%d" % (len(unv) - 1) if len(unv) > 1 else ""), 40))
+    rc = ev.get("recheck") if isinstance(ev, dict) else None
+    if isinstance(rc, dict) and isinstance(rc.get("done"), int) and isinstance(rc.get("n"), int) and rc["done"] < rc["n"]:
+        why.append(C.trim("publication recheck %d of %d" % (rc["done"], rc["n"]), 40))
     att = ((S.get("since") or {}).get("attention") or {}).get("kind")
     if att is None:
         why.append("attention not assessed")
@@ -1085,13 +1574,27 @@ def build_state(ctx):
     t = snap["facts_at"]
     phases, cur, blocking = derive_phases(ctx["plan"], J["current_phase"])
     curp = next(p for p in phases if p["id"] == cur)
-    decs = merge_decisions(J, snap, prev, root)
+    staged_it = ctx.get("staged_intent", snap.get("intent"))
+    fr = ctx.get("fit_res")
+    sacc = (staged_it or {}).get("accepted")
+    decs = merge_decisions(J, snap, prev, root, drift={"hash": sacc["hash"], "observations": fr["observations"]}
+                           if isinstance(sacc, dict) and fr else None)
     open_ids = [d["id"] for d in decs if d["status"] == "overdue"]
     key = copy.deepcopy(snap["key"])
     key["expired_ids"] = sorted(open_ids)
-    intent = build_intent(ctx.get("staged_intent", snap.get("intent")), snap.get("intent"), J["intent"])
+    intent = build_intent(staged_it, snap.get("intent"), J["intent"])
     key["intent_hash"] = intent["target"]["hash"]   # rebased: the component now names the intention THIS judgement served
-    parts = J["parts"]
+    drift = build_drift(staged_it, snap.get("intent"), fr, snap)
+    if drift is not None:
+        intent["drift"] = drift
+    # 15.1: the completion evidence of the FINAL plan and parts, with the publication's own checks in it; the key is rebased to the
+    # ids still lost in what is published (the carried unlisted ones, the recheck's new losses), so the next run knows what remains
+    evidence, lost_pairs, ok_pairs = build_evidence(snap, J, ctx["plan"], ctx.get("recheck"))
+    key["evidence_lost"] = sorted({i for i, _r in lost_pairs})
+    # I1: a mark the previous state carries on an item this judgement leaves as it was stays until that very ref verified ok (staged or
+    # validated just now), the item is reopened or removed, or it has a new ref: an unknown or unvisited result clears nothing
+    carry = (marked_pairs(prev) & set(completion_items(ctx["plan"], J["parts"]))) - ok_pairs
+    parts = copy.deepcopy(J["parts"])   # the state's own copy: marks never leak into judgement.json
     r0 = snap["repos"][0] if snap["repos"] else {}
     name = J["project"]["name"] or os.path.basename(root)
     hl = dict(J["headline"])
@@ -1112,8 +1615,7 @@ def build_state(ctx):
         "answers": {"total": snap["answers"]["total"], "applied": snap["answers"]["total"],
                     "applied_hash": snap["answers"]["total_hash"], "bad": [b["line"] for b in snap["answers"]["bad"]][:5]},
         "watch": list(J.get("watch", [])), "watch_dropped": snap.get("watch_dropped", []),
-        "repos": [dict({k: r.get(k) for k in ("path", "vcs", "branch", "head", "head_at")},
-                       **({"release": r["release"]} if isinstance(r.get("release"), dict) else {})) for r in snap["repos"]],
+        "repos": state_repos(snap["repos"], prev, completion_items(ctx["plan"], J["parts"])),
         "commits": snap["commits"], "status": dict({k: snap["status"][k] for k in ("dirty", "hash")},
                                                     git_error=snap["status"].get("git_error")),
         "ledger": ({k: snap["ledger"][k] for k in ("path", "name", "goal", "now", "next", "blockers")} if snap.get("ledger") else None),
@@ -1122,6 +1624,15 @@ def build_state(ctx):
         "retired_ids": [], "retired_decisions": "",
     }
     S["intent"] = intent
+    S["evidence"] = evidence
+    mark_unverified(S, lost_pairs | carry)
+    if fr is not None and isinstance(J.get("fit"), dict):
+        f = J["fit"]
+        S["fit"] = {"verdict": f["verdict"], "concern": f.get("concern"), "evidence": list(f.get("evidence") or []),
+                    "observations": list(fr["observations"]), "exclusion": fr["exclusion"],
+                    "scope": {"shown": (ctx.get("judged_seen") or {}).get("commits") if ctx.get("judged_seen") else None,
+                              "total": (snap.get("since") or {}).get("commits")},
+                    "against": fr["against"]}
     S["changes"] = diff_changes(prev, S, t) if prev else []
     S["judged_seen"] = ctx.get("judged_seen")   # what the model saw of the staged snapshot (13.3); None = unknown
     S["since"] = build_since(snap, J, decs, S["judged_seen"])

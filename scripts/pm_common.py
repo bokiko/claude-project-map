@@ -146,6 +146,28 @@ def intent_hash(outcome, done_when, exclusions=None):
     return sha256_bytes(canon([_intent_norm(outcome), _intent_norm(done_when), ex]).encode("utf-8", "replace"))[:16]
 
 
+def evidence_key(i, r):
+    """Key of one completion ref in cache.json `evidence.results` and in the scripts' sets: `<id>|<ref>`."""
+    return "%s|%s" % (i, r)
+
+
+# ---------------------------------------------------------------- drift record (3.6, 15.2 / 15.3)
+def new_drift(h):
+    """The drift record of ONE accepted identity (state.intent.drift): the streak of consecutive departures on new work, the repo
+    heads the last counted departure saw, the observations the owner acknowledged (answer A) and whether the owner asked to
+    revise the focus (answer B, cleared by the next F-set). Reset whenever the accepted identity changes."""
+    return {"hash": h, "streak": 0, "heads": None, "acknowledged": None, "revise_requested": False}
+
+
+def drift_new_work(drift, heads, commits):
+    """15.3 "distinct new work": the baseline counted commits AND some repository head differs from the heads the last counted
+    departure saw (`drift.heads`, null after a reset: every head is new then)."""
+    if not commits:
+        return False
+    seen = (drift or {}).get("heads") or {}
+    return any(isinstance(h, str) and h and seen.get(r) != h for r, h in (heads or {}).items())
+
+
 # ---------------------------------------------------------------- bytes-aware strings
 def blen(s):
     return len(s.encode("utf-8", "replace"))

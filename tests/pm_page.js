@@ -4,6 +4,7 @@
 // STATE_PATCH_JSON (optional) is shallow-merged over the embedded state first (used to test wording without a publish).
 // PM_PAGE_CLIP=ok|deny|missing|sync (optional): after loading, click the Handoff "Copy" button against a fake clipboard that
 // resolves, rejects, does not exist, or returns a non-promise, and report the label the page shows and what was selected.
+// Output also carries (3.6) the progress note, the criteria rows [id, text, unverified], the fit line(s) of #since and the body blocks of every disclosure.
 // No browser needed. The shim keeps only what the template uses; it records every element created, so a test can prove
 // that text from the repository never became markup (no <script>, no innerHTML).
 'use strict';
@@ -82,6 +83,9 @@ const collect = n => { all.push(n); (n.children || []).forEach(collect); };
 collect(root);
 const ctxEl = byId['context'];
 const disclosures = ctxEl ? ctxEl.children.filter(c => c.tagName === 'DETAILS').map(c => c.children[0].textContent) : [];
+const bodies = {};   // disclosure label -> the visible blocks of its body (list items one by one)
+if (ctxEl) for (const d of ctxEl.children.filter(c => c.tagName === 'DETAILS')) bodies[d.children[0].textContent] = blocks(d.children[1]);
+const crit = all.filter(n => n.dataset && n.dataset.criterion).map(n => [n.dataset.criterion, n.textContent, n.dataset.unverified === '1']);
 const pre = all.find(n => n.className === 'handoff-text');
 const btn = all.find(n => n.className === 'copy-btn');
 const note = all.find(n => n.className === 'copy-note');
@@ -99,6 +103,8 @@ const note = all.find(n => n.className === 'copy-note');
     sinceHidden: since ? since.hidden : null, since: since && !since.hidden ? blocks(since) : [],
     attention: since && !since.hidden ? since.children.filter(c => c.dataset && c.dataset.attention).map(c => c.dataset.attention) : [],
     focus: since && !since.hidden ? since.children.filter(c => c.dataset && c.dataset.focus).map(c => [c.dataset.focus, c.textContent]) : [],
+    fit: since && !since.hidden ? since.children.filter(c => c.dataset && c.dataset.fit).map(c => [c.dataset.fit, c.textContent]) : [],
+    progress: t('progress-note'), criteria: crit, bodies: bodies,
     stale: root.children.filter(c => c.className === 'stale').map(c => c.textContent),
     snapshot: snapRows, created: created, scripts: created.filter(x => x === 'script' || x === 'iframe').length,
     tagline: t('tagline'), disclosures: disclosures, handoff: pre ? pre.textContent : null, copyLabel: btn ? btn.textContent : null, copy: copy,

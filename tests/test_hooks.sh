@@ -478,6 +478,26 @@ PY
   VL=$(renv python3 "$RP/scripts/project-map-facts.py" "$RR" --no-stage)
   eq "H-focus: facts (not the hook) applies the plain confirmation without a model" "NEEDS_REFRESH focus confirmed" "$VL"
   ok "H-focus: ... applied 1 and the focus is accepted" $([ "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["answers"]["applied"], d["intent"]["accepted"]["line"])' "$RPM/state.json")" = "1 1" ] && echo 1 || echo 0)
+  # H-cache-lock (3.6): the hook's own cache.json update is made under the publish lock. With the lock held elsewhere it does not write
+  # at all: the evidence record in that file (script-owned, epoch-ordered) cannot be rolled back by a stale read-modify-write.
+  python3 - "$RPM/cache.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d.pop("ack_attempt_at", None)
+d["evidence"] = {"set": "S", "gen": "000001-aaaaaaaa", "epoch": 9, "results": {}}
+json.dump(d, open(p, "w"))
+PY
+  echo "<!-- restyled a third time -->" >> "$RP/scripts/project-map-template.html"
+  ( python3 "$HERE/tests/pm_testlib.py" holder "$RPM" > "$SCR/holder.out" 2>&1 ) & HOLDPID=$!
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q held "$SCR/holder.out" 2>/dev/null && break; sleep 0.1; done
+  CACHE_BEFORE=$(cat "$RPM/cache.json"); REAL_ENV=""
+  run_real prompt "$RR"
+  kill $HOLDPID 2>/dev/null; wait $HOLDPID 2>/dev/null
+  eq "H-cache-lock: the embed could not run (the lock is held) and the hook says so" "project-map: PM_EMBED_ERROR another embed is running" "$CTX"
+  eq "H-cache-lock: ... cache.json was not touched (no ack_attempt_at written, the evidence record as it was)" "$CACHE_BEFORE" "$(cat "$RPM/cache.json")"
+  ok "H-cache-lock: ... and the hook still returned before its 5 s timeout (${MS} ms)" $([ "$MS" -lt 5000 ] && echo 1 || echo 0)
+  run_real prompt "$RR"
+  eq "H-cache-lock: with the lock free again the hook publishes and acknowledges as before" "project-map: map re-rendered after a plugin update" "$CTX"
+  ok "H-cache-lock: ... and the evidence record survived the hook (its epoch only went up: the refresh made a pass of its own)" $([ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["evidence"]["epoch"])' "$RPM/cache.json")" -ge 9 ] && echo 1 || echo 0)
 else
   echo "SKIP: H-prompt, H-prompt-deadline (scratch map not built)"
 fi

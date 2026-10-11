@@ -56,6 +56,7 @@ Relay each `ASK:` line as one question (AskUserQuestion): recommended option fir
 
 Focus (3.5), only when the owner says it. **"confirm focus"**: append `{"id":"F-set","answer":"<outcome>","note":"<done when>","exclusions":["..."],"at":"<iso>","by":"owner"}` with the proposal's (or the accepted record's) `outcome` and `done_when` verbatim and the CURRENTLY accepted `exclusions` kept unless the owner asks to drop them (read all three with `jq -c .intent <ROOT>/.project-map/current/state.json`), then rerun from step 1: a plain confirmation is applied without a model call (`NEEDS_REFRESH focus confirmed`).
 **"the focus is X, done when Y"**: the same line with their words (`exclusions` only if they state them: at most 3, 80 bytes each). **"handoff"**: `cat <ROOT>/.project-map/current/handoff.txt` and print it.
+A decision with `about: drift` ("the work seems to have left the focus") is relayed like any other (A / B / C, recommended option first, default hold). If the owner answers **B**, ask for the new focus in one line and append it as the "the focus is X" `F-set` above, then rerun from step 1; A and C need nothing more.
 Never ask about the focus on an ordinary refresh.
 
 ## 6. Recovery

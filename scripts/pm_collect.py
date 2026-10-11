@@ -612,9 +612,11 @@ def _walk_files(base, hash_deadline):
     return out, cut
 
 
-def hash_watch(root, entries, cache, hash_deadline):
+def hash_watch(root, entries, cache, hash_deadline, fp_out=None):
     """Content-hash every watched path. cache: {abs: {dev, ino, size, mtime_ns, ctime_ns, sha256}} (mutated).
-    -> (watch list, covered, total). An entry whose files were not all hashed in time gets hash 'partial'."""
+    -> (watch list, covered, total). An entry whose files were not all hashed in time gets hash 'partial'.
+    fp_out (a dict, optional): receives, for every entry that is ONE regular file, {entry: {fp, status}} with the content
+    fingerprint (sha256 of the bytes, first 12 hex) or {status: unknown} when the file could not be hashed in time (15.2)."""
     slow = float(os.environ.get("PM_FACTS_SLOW", "0") or 0)
     res, covered, total = [], 0, 0
     live = set()
@@ -634,12 +636,16 @@ def hash_watch(root, entries, cache, hash_deadline):
             total += 1
             if time.monotonic() >= hash_deadline:
                 ok = False
+                if fp_out is not None and kind == "file":
+                    fp_out[ent] = {"status": "unknown"}
                 continue
             try:
                 st = os.lstat(ap)
             except OSError:
                 h.update(rel.encode("utf-8", "replace") + b"\0gone\n")
                 covered += 1
+                if fp_out is not None and kind == "file":
+                    fp_out[ent] = {"status": "unknown"}
                 continue
             live.add(ap)
             ident = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
@@ -656,6 +662,9 @@ def hash_watch(root, entries, cache, hash_deadline):
                 cache[ap] = dict(ident, sha256=sha)
             covered += 1
             h.update(rel.encode("utf-8", "replace") + b"\0" + sha.encode() + b"\n")
+            if fp_out is not None and kind == "file":   # I4: a symlinked watch entry has NO usable file identity (as on the dirty route)
+                fp_out[ent] = {"fp": sha[:12], "status": "verified"} if statmod.S_ISREG(st.st_mode) and re.fullmatch(r"[0-9a-f]{64}", sha) \
+                    else {"status": "unknown"}
         res.append({"path": ent, "kind": kind, "hash": h.hexdigest()[:12] if ok else "partial", "n": len(files)})
     for k in [k for k in cache if k not in live]:
         del cache[k]
@@ -816,7 +825,7 @@ def collect_repo(root, rp, prev_head, watch_rel, git_timeout, rel_cache=None):
     commits = []
     for sha, ts, subj in listed:
         f = "watch" if sha in flagged_watch else ("fail" if FAIL_RE.search(subj) else None)
-        commits.append({"r": rp, "h": sha[:7], "day": _day(ts), "s": C.trim(subj, 60), "f": f})
+        commits.append({"r": rp, "h": sha[:7], "o": sha, "day": _day(ts), "s": C.trim(subj, 60), "f": f})   # "o": the full id, kept for fit evidence (15.2)
     info["commits"] = count
     return info, count, h.hexdigest(), [p if rp == "." else rp + "/" + p for p in paths], commits
 
@@ -1020,9 +1029,20 @@ def _rec_ok(x, keys):
         and (not isinstance(x.get("exclusions", []), list) or all(isinstance(e, str) for e in x.get("exclusions", [])))
 
 
+def _drift_ok(x):
+    ack = x.get("acknowledged") if isinstance(x, dict) else None
+    hd = x.get("heads") if isinstance(x, dict) else None
+    return isinstance(x, dict) and isinstance(x.get("hash"), str) and isinstance(x.get("streak"), int) and not isinstance(x.get("streak"), bool) \
+        and x["streak"] >= 0 and isinstance(x.get("revise_requested"), bool) \
+        and (hd is None or (isinstance(hd, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in hd.items()))) \
+        and (ack is None or (isinstance(ack, dict) and isinstance(ack.get("observations"), list)
+                             and all(isinstance(o, str) for o in ack["observations"])))
+
+
 def intent_of(S):
-    """A published state's intent, shape-checked: {accepted, proposed, target}, each a well-formed record or None. A state from
-    before 3.5 (no intent) and anything malformed give None entries; nothing here raises."""
+    """A published state's intent, shape-checked: {accepted, proposed, target}, each a well-formed record or None; plus `drift` (3.6)
+    when the state carries a well-formed record of it (the key is absent otherwise, so a map without an accepted focus looks as it
+    did before 3.6). A state from before 3.5 (no intent) and anything malformed give None entries; nothing here raises."""
     it = S.get("intent") if isinstance(S, dict) else None
     out = {"accepted": None, "proposed": None, "target": None}
     if isinstance(it, dict):
@@ -1030,6 +1050,8 @@ def intent_of(S):
                         ("target", ("outcome", "done_when", "exclusions", "hash"))):
             if _rec_ok(it.get(k), keys):
                 out[k] = copy.deepcopy(it[k])
+        if _drift_ok(it.get("drift")):
+            out["drift"] = copy.deepcopy(it["drift"])
     return out
 
 
@@ -1045,10 +1067,16 @@ def intent_base(prev):
 
 def reconcile_intent(it):
     """A proposal that says what the accepted focus says is no proposal (the model cannot set exclusions, so they are the
-    accepted record's own)."""
+    accepted record's own). 3.6: the drift record belongs to ONE accepted identity: with no accepted record there is none, and a
+    record of another identity (a replay, a focus set outside the reducer) is replaced by a fresh one."""
     a, p = it.get("accepted"), it.get("proposed")
     if a and p and C.intent_hash(p["outcome"], p["done_when"], a.get("exclusions")) == a["hash"]:
         it["proposed"] = None
+    d = it.get("drift")
+    if not isinstance(a, dict):
+        it.pop("drift", None)
+    elif not (isinstance(d, dict) and d.get("hash") == a.get("hash")):
+        it["drift"] = C.new_drift(a["hash"])
     return it
 
 
@@ -1069,15 +1097,44 @@ def confirmation_only(prev_state, lines, applied):
         a["id"] == F_SET and C.intent_hash(a["answer"], a["note"], a.get("exclusions")) == tg["hash"] for a in pending)
 
 
+def drift_focus_set(intent, acc):
+    """3.6 (15.2): an F-set line is the owner speaking about the focus. A new identity starts a fresh drift record (streak, heads,
+    acknowledgement and revision request all belong to the words that were accepted); the same identity only clears a pending
+    revision request ("cleared by the next F-set")."""
+    d = intent.get("drift")
+    if isinstance(d, dict) and d.get("hash") == acc["hash"]:
+        d["revise_requested"] = False
+    else:
+        intent["drift"] = C.new_drift(acc["hash"])
+
+
+def drift_answer(intent, dec, answer):
+    """3.6 (15.3): the side effect of an owner's answer to a drift decision on the drift record IN EFFECT AT THAT LINE. EVERY effect is
+    guarded by `decision.intent_hash == drift.hash`: an answer to a question about an older intention is recorded by the ordinary
+    `D-` lifecycle and its side effect is moot. A: acknowledge the observations the decision was raised about, streak 0. B: ask for
+    a revision (cleared by the next F-set). C: nothing."""
+    d = intent.get("drift")
+    if answer not in ("A", "B") or not isinstance(d, dict) or dec.get("about") != "drift" or dec.get("intent_hash") != d.get("hash"):
+        return
+    if answer == "A":
+        d["acknowledged"] = {"observations": [o for o in (dec.get("observations") or []) if isinstance(o, str)]}
+        d["streak"] = 0
+    else:
+        d["revise_requested"] = True
+
+
 def apply_answers(by_id, pending, intent=None):
     """THE reducer for owner lines (14.2), in file order. A `D-` line answers an open/overdue decision of by_id (the last one
     per decision wins); an `F-set` line sets intent["accepted"] (the last one wins) and is never a decision answer. With
-    intent=None an F-set line is skipped. -> list of bad {line, why}."""
+    intent=None an F-set line is skipped. 3.6: the same pass keeps intent["drift"] (15.2/15.3): an F-set resets or clears it, an
+    answer to a drift decision acts on it under the intent_hash guard, each with the record as it is at that line. Used by
+    lifecycle, late_answers and the --accept-answers replay alike. -> list of bad {line, why}."""
     bad, applied = [], {}
     for a in pending:
         if a["id"] == F_SET:
             if intent is not None:
                 intent["accepted"] = accepted_record(a)
+                drift_focus_set(intent, intent["accepted"])
             continue
         d = by_id.get(a["id"])
         if not d:
@@ -1087,6 +1144,8 @@ def apply_answers(by_id, pending, intent=None):
         else:
             d.update(status="answered", answer=a["answer"], answered_by=a["by"], answered_at=a["at"])
             applied.setdefault(a["id"], []).append(a["line"])
+            if intent is not None:
+                drift_answer(intent, d, a["answer"])
     for i, ls in applied.items():
         if len(ls) > 1:
             bad.append({"line": ls[0], "why": "%s answered %d times, last kept" % (i, len(ls))})
@@ -1144,6 +1203,310 @@ def late_answers(pm, snap, ids, image=None):
             "answers": dict(a, total=len(lines), applied=len(lines), applied_hash=ph, total_hash=ph, pending=[],
                             bad=list(a["bad"]) + bad),
             "intent": intent, "won": won}
+
+
+# ---------------------------------------------------------------- completion evidence (3.6.0, INTERFACES 15.1)
+# The pinned state's completion refs (a done criterion's ref, a done part's ref) are re-checked a few at a time on every facts run
+# and mechanical refresh. A ref that is gone is a LOSS: the script never flips `done`, it marks the item unverified, moves the key
+# and queues a repair for the next judgement. Absence is only ever what a SUCCESSFUL query documents; a timeout, a permission
+# error or a repository that cannot be read is `unknown`.
+EVID_CAP = 40                                   # checks per pass
+EVID_RANK = {"ok": 0, "unknown": 1, "lost": 2}  # the equal-epoch safety rule: the worse status wins
+EVID_WHY = VAL.EVID_WHY
+
+
+def evidence_items(S):
+    """The completion refs of a published state: [(id, ref)] sorted, one per done criterion and per done part that carries a ref."""
+    out = set()
+    if isinstance(S, dict):
+        for ph in S.get("phases") or []:
+            for c in (ph.get("criteria") or []) if isinstance(ph, dict) else []:
+                if isinstance(c, dict) and c.get("done") is True and isinstance(c.get("id"), str) and isinstance(c.get("ref"), str) and c["ref"]:
+                    out.add((c["id"], c["ref"]))
+        for p in S.get("parts") or []:
+            if isinstance(p, dict) and p.get("status") == "done" and isinstance(p.get("id"), str) and isinstance(p.get("ref"), str) and p["ref"]:
+                out.add((p["id"], p["ref"]))
+    return sorted(out)
+
+
+evidence_key = C.evidence_key
+
+
+def evidence_set(items):
+    """Identity of the completion-ref list of one pinned generation (sha256 of the sorted (id, ref) pairs, first 16 hex)."""
+    return C.sha256_bytes(C.canon(sorted([i, r] for i, r in items)).encode("utf-8", "replace"))[:16]
+
+
+def evidence_record_ok(x):
+    """cache.json `evidence` is script-owned but lives in a mutable file: anything malformed counts as no record."""
+    return isinstance(x, dict) and isinstance(x.get("set"), str) and isinstance(x.get("gen"), str) \
+        and isinstance(x.get("epoch"), int) and not isinstance(x.get("epoch"), bool) and x["epoch"] >= 0 \
+        and isinstance(x.get("results"), dict) \
+        and all(isinstance(k, str) and isinstance(v, dict) and v.get("status") in EVID_RANK and isinstance(v.get("epoch"), int)
+                and not isinstance(v.get("epoch"), bool) for k, v in x["results"].items())
+
+
+def _evid_pick(a, b):
+    """Two results for ONE key: the higher epoch wins; an equal epoch (impossible across passes, kept as a safety rule) by status
+    rank lost > unknown > ok."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a["epoch"] != b["epoch"]:
+        return a if a["epoch"] > b["epoch"] else b
+    return a if EVID_RANK[a["status"]] >= EVID_RANK[b["status"]] else b
+
+
+def evidence_merge(stored, mine, keys):
+    """15.1 merge rules (the pass itself runs inside one critical section and reads the stored record under the lock, so this is
+    also the pure function the tests drive): a pass whose `gen` is OLDER than the stored one discards its own results; a NEWER
+    `gen`, or a changed `set` for the same gen, replaces the record and keeps the stored results whose key is still in the set
+    (`keys`); the same set merges per key by the higher epoch, an equal epoch by rank. -> the record to store."""
+    if not evidence_record_ok(stored):
+        return copy.deepcopy(mine)
+    if mine["gen"] < stored["gen"]:
+        return copy.deepcopy(stored)
+    same = mine["gen"] == stored["gen"] and mine["set"] == stored["set"]
+    base = stored["results"] if same else {k: v for k, v in stored["results"].items() if k in keys}
+    res = {k: copy.deepcopy(v) for k, v in base.items()}
+    for k, v in mine["results"].items():
+        res[k] = copy.deepcopy(_evid_pick(res.get(k), v))
+    return {"set": mine["set"], "gen": mine["gen"], "epoch": max(stored["epoch"], mine["epoch"]), "results": res}
+
+
+def _crit_first(i):
+    return (0 if VAL.CRIT_ID.match(i) else 1, i)
+
+
+def evidence_view(items, rec):
+    """snapshot.evidence from the completion refs and a stored record: {checked, n, done, lost[{id, ref, why}], unknown[ids],
+    ok[{id, ref}]}. `done` = refs visited since the set formed; `checked` is complete iff every ref has been visited and none is
+    unknown (an empty list is trivially complete)."""
+    res = rec.get("results", {}) if evidence_record_ok(rec) else {}
+    lost, unknown, ok, done = [], [], [], 0
+    for i, r in items:
+        v = res.get(evidence_key(i, r))
+        if v is None:
+            continue
+        done += 1
+        if v["status"] == "lost":
+            lost.append({"id": i, "ref": r, "why": v.get("why") if v.get("why") in EVID_WHY else "file missing"})
+        elif v["status"] == "unknown":
+            unknown.append(i)
+        else:
+            ok.append({"id": i, "ref": r})
+    lost.sort(key=lambda e: _crit_first(e["id"]))
+    return {"checked": "complete" if done == len(items) and not unknown else "partial", "n": len(items), "done": done,
+            "lost": lost, "unknown": sorted(unknown), "ok": ok}
+
+
+def empty_evidence():
+    return {"checked": "complete", "n": 0, "done": 0, "lost": [], "unknown": [], "ok": []}
+
+
+def _repo_probe(root, r, sha, t):
+    """One repository row against a commit: ok | absent | moved | unknown. A repository is `moved` when its recorded path is no
+    longer a directory under ROOT (removed, or replaced by a link elsewhere); a failing query is `absent` only when the
+    repository itself still answers (git can name its toplevel), otherwise `unknown`."""
+    prob, rp = VAL._confined(root, r.get("path") if isinstance(r.get("path"), str) else "", "repo path")
+    if prob:   # an established confinement failure (a path replaced by a link elsewhere, a bad path)
+        return "moved"
+    try:   # I5: only ESTABLISHED absence (ENOENT / ENOTDIR) or a non-directory is `moved`; a permission or I/O error is unknown
+        isdir = statmod.S_ISDIR(os.stat(rp).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return "moved"
+    except OSError:
+        return "unknown"
+    if not isdir:
+        return "moved"
+    try:
+        rc, out = G.run(rp, "cat-file", "-t", sha, timeout=t)
+    except G.GitArgError:
+        return "unknown"
+    if rc == 0:
+        return "ok" if out.strip() == "commit" else "absent"
+    if rc in (1, 128):
+        return "absent" if G.toplevel(rp, timeout=t) else "unknown"
+    return "unknown"   # 124 timeout, 127 no git, anything else
+
+
+def evidence_repos(repos, state):
+    """The repositories a commit ref is looked for in: the collected git rows PLUS every git repository the pinned state already knows
+    (I5): collection drops a nested repository it cannot even enter (or sees it as a plain folder), and that must never turn a commit
+    into "missing". A known repository the collection did not report as git is probed by its recorded path."""
+    have = {r.get("path") for r in repos if isinstance(r, dict) and r.get("vcs") == "git"}
+    extra = [{"path": r["path"], "vcs": "git"} for r in ((state or {}).get("repos") or [])
+             if isinstance(r, dict) and r.get("vcs") == "git" and isinstance(r.get("path"), str) and r["path"] not in have]
+    return list(repos) + extra
+
+
+def check_ref(root, repos, ref, deadline=None):
+    """-> (status, why). status ok | lost | unknown; why is one of EVID_WHY for lost. 15.1: `file:` -> lstat of the confined path is
+    a regular file and a given line exists; `commit:` -> cat-file in the confined repositories. Absence is only what a successful
+    query documents (ENOENT, a cat-file answer from a repository that still works)."""
+    if not isinstance(ref, str):
+        return "lost", "file missing"
+    if ref.startswith("file:"):
+        rest, line = ref[5:], None
+        m = re.match(r"^(.*):([0-9]+)$", rest)
+        if m:
+            rest, line = m.group(1), int(m.group(2))
+        prob, rp = VAL._confined(root, rest, "file ref")
+        if prob:
+            return "lost", "file missing"
+        orig = os.path.join(root, rest)   # the entry the ref NAMES, not what a link resolves to (I3)
+        try:
+            st = os.lstat(orig)
+        except (FileNotFoundError, NotADirectoryError):
+            return "lost", "file missing"
+        except OSError:
+            return "unknown", ""
+        if not statmod.S_ISREG(st.st_mode):   # a symlink (internal, dangling, escaping) or a directory is not a regular file
+            return "lost", "file missing"
+        if line is not None:
+            if line < 1:
+                return "lost", "line past end"
+            try:
+                n = C.line_count(orig)
+            except OSError:
+                return "unknown", ""
+            if line > n:
+                return "lost", "line past end"
+        return "ok", ""
+    if ref.startswith("commit:"):
+        sha = ref[7:]
+        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            return "lost", "commit missing"
+        t = 5.0 if deadline is None else max(0.3, min(5.0, deadline - time.monotonic()))
+        seen = set()
+        for r in repos:
+            if isinstance(r, dict) and r.get("vcs") == "git":
+                st = _repo_probe(root, r, sha, t)
+                if st == "ok":
+                    return "ok", ""
+                seen.add(st)
+        if "unknown" in seen:
+            return "unknown", ""
+        return "lost", "repo moved" if "moved" in seen else "commit missing"
+    return "lost", "file missing"
+
+
+def _evidence_gate():
+    """Test seam PM_EVIDENCE_GATE=<file>: inside the evidence critical section (epoch reserved, nothing checked yet) create <file>
+    and wait (at most 20 s) for <file>.go, so a test can run a second process against a busy lock or change the world between
+    two passes deterministically."""
+    sig = os.environ.get("PM_EVIDENCE_GATE")
+    if not sig:
+        return
+    try:
+        with open(sig, "w"):
+            pass
+    except OSError:
+        return
+    end = time.monotonic() + 20.0
+    while not os.path.exists(sig + ".go") and time.monotonic() < end:
+        time.sleep(0.02)
+
+
+def check_evidence(root, repos, items, cache, deadline, gen, only=None, held=False, limit=EVID_CAP):
+    """THE evidence scheduler (facts' collect, embed's mechanical collect and the publication recheck all use it). `items` =
+    the completion refs [(id, ref)] of the pinned generation `gen`; the pass checks at most `limit` of them (or of `only`, a
+    subset, for the recheck), least recently checked first (unvisited first, then the lowest epoch, ties by id), until the
+    absolute time.monotonic() `deadline`.
+
+    The whole pass is ONE critical section under the publish lock (non-blocking; `held=True` when the caller, embed, already
+    holds it): re-read cache.json, reserve epoch + 1, check, merge, write, release. Two passes therefore never overlap, so epoch
+    order IS observation order and a physically later loss can never be discarded by an earlier `ok`. A busy lock skips the
+    pass: the record is untouched and the view is built from what is stored, never "complete" by assumption.
+    -> (view, ran): view as evidence_view; ran = {key: {status, why}} of the checks THIS pass made ({} when it was skipped)."""
+    pm = os.path.join(root, ".project-map")
+    items = sorted(set(items))
+    keys = {evidence_key(i, r): (i, r) for i, r in items}
+    sid = evidence_set(items)
+    cpath = os.path.join(pm, "cache.json")
+
+    def stored_record():
+        rec = (C.load_json(cpath, {}) or {}).get("evidence") if os.path.isfile(cpath) else None
+        return rec if evidence_record_ok(rec) else None
+
+    def compat(rec):   # a stored record viewed through THIS pass's keys
+        return {"set": sid, "gen": gen, "epoch": rec["epoch"], "results": {k: v for k, v in rec["results"].items() if k in keys}} if rec else None
+
+    if not items or not os.path.isdir(pm):
+        return empty_evidence() if not items else evidence_view(items, None), {}
+    lock = None
+    if not held:
+        try:
+            lock = C.PMLock(pm).acquire()
+        except (C.Busy, OSError):
+            return evidence_view(items, compat(stored_record())), {}   # busy: the record is untouched
+    try:
+        stored = stored_record()
+        if stored is not None and stored["gen"] > gen:   # a newer generation already owns the record: this pass discards its own
+            return evidence_view(items, compat(stored)), {}
+        epoch = (stored["epoch"] if stored else 0) + 1
+        _evidence_gate()
+        base = compat(stored)["results"] if stored else {}
+        pool = [k for k in keys if only is None or keys[k] in only]
+        pool.sort(key=lambda k: (k in base, base[k]["epoch"] if k in base else 0, k))
+        mine, ran = {"set": sid, "gen": gen, "epoch": epoch, "results": {}}, {}
+        for k in pool[:limit]:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            st, why = check_ref(root, repos, keys[k][1], deadline)
+            ran[k] = {"status": st, "why": why}
+            mine["results"][k] = {"status": st, "why": why, "at": C.iso(), "epoch": epoch}
+        merged = evidence_merge(stored, mine, set(keys))
+        try:
+            cur = C.load_json(cpath, {}) or {}
+            cur = cur if isinstance(cur, dict) else {}
+            cur["evidence"] = merged
+            C.atomic_write(cpath, C.dumps(cur))
+        except OSError:
+            pass   # the observation stands for this run even when it could not be stored
+        cache["evidence"] = merged
+        return evidence_view(items, compat(merged)), ran
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+# ---------------------------------------------------------------- file identity (3.6.0, INTERFACES 15.2)
+FP_MAX_DIRTY = 20
+
+
+def fp_key(path):
+    return os.path.normpath(path)
+
+
+def file_fingerprint(abspath, cache, deadline):
+    """{fp, status: verified} (sha256 of the bytes, first 12 hex) of ONE regular file, or {status: unknown} for anything else
+    (a directory, a link, a missing or unreadable file, a hash that did not finish before the deadline). `cache` is the small
+    fp_cache {abs: {dev, ino, size, mtime_ns, ctime_ns, sha256}} so an unchanged file is read once."""
+    try:
+        st = os.lstat(abspath)
+    except OSError:
+        return {"status": "unknown"}
+    if not statmod.S_ISREG(st.st_mode):
+        return {"status": "unknown"}
+    ident = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
+    c = cache.get(abspath)
+    if isinstance(c, dict) and all(c.get(k) == v for k, v in ident.items()) and isinstance(c.get("sha256"), str):
+        sha = c["sha256"]
+    else:
+        h = hashlib.sha256()
+        try:
+            with open(abspath, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    if time.monotonic() >= deadline:
+                        return {"status": "unknown"}
+                    h.update(chunk)
+        except OSError:
+            return {"status": "unknown"}
+        sha = h.hexdigest()
+        cache[abspath] = dict(ident, sha256=sha)
+    return {"fp": sha[:12], "status": "verified"}
 
 
 # ---------------------------------------------------------------- usage / hashes
@@ -1216,10 +1579,12 @@ def plugin_hashes():
 
 # ---------------------------------------------------------------- the collector
 def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False, usage_timeout=60.0, usage_until=None, usage_prev=None,
-            answers_image=None, image_out=None):
+            answers_image=None, image_out=None, evidence_held=False):
     """Build the complete snapshot (6.1). hash_deadline: absolute time.monotonic() limit for content hashing only.
     answers_image: (lines, tail) of ONE read_answers_ex the caller already made (embed --apply-answers, 14.3: the decision and
     the snapshot then describe the same bytes); image_out (a dict) receives {lines, tail} of the read this collection used.
+    3.6: the completion-evidence pass (check_evidence) is the one thing collect() writes itself (cache.json `evidence`, inside its
+    own critical section under the publish lock); evidence_held=True when the caller already holds that lock (embed).
     Raises GitCollectError, AnswersRewritten."""
     t = C.now()
     pm = os.path.join(root, ".project-map")
@@ -1257,9 +1622,22 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     commits.sort(key=lambda c: c["day"], reverse=True)
 
     wc = cache.setdefault("watch_cache", {})
-    wl, covered, total = hash_watch(root, watch, wc, hd)
+    fpw = {}
+    wl, covered, total = hash_watch(root, watch, wc, hd, fp_out=fpw)
     partial = any(w["hash"] == "partial" for w in wl)
     cache["coverage_cursor"] = {"covered": covered, "total": total, "at": C.iso(t)}
+    # 15.2: ONE content fingerprint per file, frozen now: every retained dirty path (<= 20) and every watch entry that is a single
+    # regular file. Both routes land in the same map (a file reachable both ways has one identity); a directory has none.
+    fpc = cache.setdefault("fp_cache", {})
+    file_fp = {fp_key(w["path"]): fpw[w["path"]] for w in wl if w.get("kind") == "file" and w["path"] in fpw}
+    for dpath in dirty[:FP_MAX_DIRTY]:
+        file_fp.setdefault(fp_key(dpath), file_fingerprint(os.path.join(root, dpath), fpc, hd))
+    keep = {os.path.join(root, dpath) for dpath in dirty[:FP_MAX_DIRTY]}
+    for k in [k for k in fpc if k not in keep]:
+        del fpc[k]
+    # 15.1: the completion refs of the pinned state, a few per run (the scheduler is shared with embed and the publication recheck)
+    ev_items = evidence_items(prev["state"]) if prev.get("kind") == "v4" else []
+    evidence, _ran = check_evidence(root, evidence_repos(repos, prev.get("state")), ev_items, cache, hd, prev.get("gen"), held=evidence_held)
 
     lname = pj.get("ledger") if isinstance(pj.get("ledger"), str) else None
     ledger = parse_ledger(root, lname)
@@ -1290,7 +1668,9 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
            "ledger_hash": ledger["hash"] if ledger else None, "answers_count": len(lines), "expired_ids": expired,
            "schema": C.SCHEMA_STATE,
            # 14.3: the OPERATIVE intention's identity: the owner's accepted record, else what the last judgement served
-           "intent_hash": intent["accepted"]["hash"] if intent["accepted"] else (intent["target"] or {}).get("hash")}
+           "intent_hash": intent["accepted"]["hash"] if intent["accepted"] else (intent["target"] or {}).get("hash"),
+           # 15.1: the ids of the completion refs that are known lost (script-owned; a state judged before 3.6 has none)
+           "evidence_lost": sorted(e["id"] for e in evidence["lost"])}
     usage = None
     if want_usage:   # usage_until (absolute time.monotonic()) is evaluated NOW, after the git and hashing work above
         ut = usage_timeout if usage_until is None else min(usage_timeout, usage_until - time.monotonic())
@@ -1305,6 +1685,8 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
                     "pending": pending, "bad": bad, "tail": tail},
         "decisions": decs, "usage": usage, "key": key, "prev_key": prev.get("judged_key"),
         "template_hash": th, "embed_hash": eh, "intent": intent,
+        "evidence": evidence, "file_fp": file_fp,
+        "commit_oids": {"%s|%s" % (c["r"], c["h"]): c["o"] for c in commits if c.get("o")},
     }
     snap["since"] = since_baseline(prev, t, snap["commits"]["count"], len(dirty))
     return snap
@@ -1391,6 +1773,18 @@ def compare_keys(judged, key, snap):
         moved.append("closure_deferred")
         if "answers_count" not in moved[:-1]:
             why.append("answers pending: closure of %s was deferred past an uncommitted answer tail" % ", ".join(deferred_moved))
+    # 15.1 completion evidence: a loss the judged key does not know (`completion evidence lost`) or one it carried and nobody has repaired
+    # yet (`N completion repairs pending`: the carried ones still need their batch) moves the key; ids that left the fresh set
+    # because their refs verify again are not a move on their own (decide then asks for a mechanical refresh that clears the marks)
+    fl = set(key.get("evidence_lost") or [])
+    jl = set(judged.get("evidence_lost") or [])
+    if fl - jl or fl & jl:
+        moved.append("evidence_lost")
+        if fl - jl:
+            ids = sorted(fl - jl)
+            why.append("completion evidence lost: " + ", ".join(ids[:3]) + (" +%d" % (len(ids) - 3) if len(ids) > 3 else ""))
+        if fl & jl:
+            why.append("%d completion repairs pending" % len(fl & jl))
     if "expired_ids" in moved:
         why.append("deadline passed: " + ", ".join(snap["key"]["expired_ids"] or judged.get("expired_ids", [])))
     if "schema" in moved:
@@ -1410,6 +1804,17 @@ def build_pack(snap, inv_name):
     acc, prop = it.get("accepted"), it.get("proposed")
     p["intent"] = {"accepted": {k: acc.get(k) for k in ("outcome", "done_when", "exclusions")} if isinstance(acc, dict) else None,
                    "proposed": {k: prop.get(k) for k in ("outcome", "done_when")} if isinstance(prop, dict) else None}
+    # 15.1: the repair queue, RESERVED like intent (never trimmed, part of every size measurement): the first 12 completion refs the
+    # script found lost (criteria before parts, by id), ref cut to 60 bytes, and how many more wait for a later batch
+    ev = snap.get("evidence") or {}
+    p["repairs"] = {"lost": [{"id": e["id"], "ref": C.trim(e["ref"], 60), "why": e["why"]} for e in VAL.repairs_listed(ev)],
+                    "more": max(0, len(ev.get("lost") or []) - VAL.REPAIRS_MAX)}
+    # 15.2/15.3: the staged drift record, RESERVED and small: what the model needs to know before it may raise a drift decision
+    dr = it.get("drift") if isinstance(acc, dict) else None
+    p["drift"] = {"streak": dr["streak"], "new_work": C.drift_new_work(dr, (snap.get("key") or {}).get("heads"), (snap.get("since") or {}).get("commits", 0)),
+                  "acknowledged": [], "revise_requested": dr["revise_requested"],   # K1: filled below from the pack as it stands
+                  "open": any(isinstance(d, dict) and d.get("about") == "drift" and d.get("status") in VAL.OPEN_ST for d in snap.get("decisions") or [])
+                  } if isinstance(dr, dict) else None
     p.update({k: snap[k] for k in ("repos", "commits", "status", "watch", "ledger", "answers", "decisions", "usage", "watch_dropped",
                                    "dirty_paths", "template_hash")})
     p = C.loads(C.dumps(p))   # deep copy
@@ -1421,6 +1826,9 @@ def build_pack(snap, inv_name):
     p["answers"].pop("total_hash", None)
     p["answers"].pop("tail", None)
     for d in p["decisions"]:   # the script's verdict on each decision's resolves_when (the model never has to guess)
+        if isinstance(d, dict):
+            d.pop("intent_hash", None)   # drift decisions: script-owned fields the model neither needs nor may write
+            d.pop("observations", None)
         if isinstance(d, dict) and d.get("status") in ("open", "overdue") and d.get("resolves_when"):
             try:
                 ok, _ev, _unmet, why = VAL.evaluate_resolves_when_ex(snap["root"], snap, d["resolves_when"])
@@ -1527,6 +1935,8 @@ def build_pack(snap, inv_name):
     n_steps = 0
     while True:
         p["seen"] = compute_seen(snap, p)
+        if isinstance(p.get("drift"), dict):   # K1: the acknowledged refs the pack still lists; recomputed after every trim, counted in every measurement
+            p["drift"]["acknowledged"] = VAL.acknowledged_refs(snap, p)
         if size() <= PACK_MAX:
             break
         if n_steps >= len(steps):
@@ -1541,13 +1951,8 @@ SEEN_KEYS = ("commits", "commits_total", "dirty", "dirty_total", "decisions_cut"
 
 
 def watch_moved_paths(snap):
-    """Watched paths whose hash moved against the judged key (snapshot prev_key). A path hashed only partially on either side
-    is not a move (compare_keys treats it the same way), and neither is a path the judged key did not have."""
-    jw = (snap.get("prev_key") or {}).get("watch_hashes") if isinstance(snap.get("prev_key"), dict) else None
-    nw = (snap.get("key") or {}).get("watch_hashes") or {}
-    if not isinstance(jw, dict):
-        return []
-    return sorted(q for q in nw if q in jw and "partial" not in (jw[q], nw[q]) and jw[q] != nw[q])
+    """Watched paths whose hash moved against the judged key (see pm_validate.watch_moved_paths)."""
+    return VAL.watch_moved_paths(snap)
 
 
 def compute_seen(snap, p):

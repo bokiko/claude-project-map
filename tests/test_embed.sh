@@ -60,7 +60,7 @@ rejraw() { # NAME RAWTEXT SUBSTRING
   if [ $r -eq 1 ] && case "$o" in *PM_EMBED_ERROR*"$3"*) true;; *) false;; esac && [ "$(cur)" = "$c0" ]; then ok "reject: $1"; else bad "reject: $1" "rc=$r out=${o:0:300}"; fi
 }
 
-if [ "${PM_FC_ONLY:-}" != 1 ]; then   # PM_FC_ONLY=1 runs section 15 alone (the 3.5.0 mutation checks); see the `fi` before section 15
+if [ "${PM_FC_ONLY:-}" != 1 ] && [ "${PM_DR_ONLY:-}" != 1 ]; then   # PM_FC_ONLY=1 runs section 15 alone, PM_DR_ONLY=1 section 16 alone (the mutation checks); see the `fi` before section 15
 
 # ======================================================================================================
 # 0. argument handling and unsupported locations
@@ -117,7 +117,7 @@ t_eq "F-stage snapshot repos[0] is git with a 40-hex-derived head" "$(get "$STAG
 t_eq "F-stage snapshot commits: 1 commit listed" "$(get "$STAGE/snapshot.json" '(d["commits"]["count"],d["commits"]["listed"])')" "(1, 1)"
 t_eq "F-stage snapshot ledger is the newest local ledger (absolute path)" "$(get "$STAGE/snapshot.json" 'd["ledger"]["path"].endswith("thoughts/ledgers/demo-engine.md") and d["ledger"]["path"].startswith("/")')" True
 t_eq "F-stage snapshot ledger sections parsed (goal / next / blockers)" "$(get "$STAGE/snapshot.json" '(d["ledger"]["goal"],d["ledger"]["next"],d["ledger"]["blockers"])')" "('- goal line', '1. step', '- b1')"
-t_eq "F-stage snapshot key has the 10 components (3.5.0: intent_hash, null on a first map)" "$(get "$STAGE/snapshot.json" 'sorted(d["key"])')" "['answers_count', 'branches', 'expired_ids', 'heads', 'intent_hash', 'ledger_hash', 'release', 'schema', 'status_hash', 'watch_hashes']"
+t_eq "F-stage snapshot key has the 11 components (3.5.0: intent_hash, null on a first map; 3.6.0: evidence_lost, empty)" "$(get "$STAGE/snapshot.json" 'sorted(d["key"])')" "['answers_count', 'branches', 'evidence_lost', 'expired_ids', 'heads', 'intent_hash', 'ledger_hash', 'release', 'schema', 'status_hash', 'watch_hashes']"
 t_eq "F-stage snapshot answers baseline: applied 0, no pending" "$(get "$STAGE/snapshot.json" '(d["answers"]["applied"],len(d["answers"]["pending"]))')" "(0, 0)"
 t_true "F-stage pack <= 8192 bytes" "[ \$(wc -c < $STAGE/pack.json) -le 8192 ]"
 t_eq "F-stage pack drops the raw keys for digests" "$(get "$STAGE/pack.json" '"key" not in d and len(d["key_digest"])==12')" True
@@ -147,7 +147,7 @@ t_eq "E-state phases derived: P1 done, P2 current, P3 next" "$(S '[(p["id"],p["s
 t_eq "E-state phase done/total per phase" "$(S '[(p["done"],p["total"]) for p in d["phases"]]')" "[(1, 1), (0, 4), (0, 0)]"
 t_eq "E-state focus: phase, done, total, next_step" "$(S '(d["focus"]["phase"],d["focus"]["done"],d["focus"]["total"],d["focus"]["next_step"]["actor"])')" "('P2', 0, 4, 'claude')"
 t_eq "E-state coverage complete" "$(S 'd["coverage"]["coverage"]')" complete
-t_eq "E-state judged_key holds the facts key; answers baseline recorded" "$(S '(sorted(d["judged_key"])==["answers_count","branches","expired_ids","heads","intent_hash","ledger_hash","release","schema","status_hash","watch_hashes"], d["answers"]["applied"])')" "(True, 0)"
+t_eq "E-state judged_key holds the facts key; answers baseline recorded" "$(S '(sorted(d["judged_key"])==["answers_count","branches","evidence_lost","expired_ids","heads","intent_hash","ledger_hash","release","schema","status_hash","watch_hashes"], d["answers"]["applied"])')" "(True, 0)"
 t_eq "E-state history has one run, run.n 1" "$(S '(len(d["history"]),d["run"]["n"])')" "(1, 1)"
 t_eq "E-state decisions: D-001 open (not ready), D-002 hard-rule open" "$(S '[(x["id"],x["status"],x["default"]) for x in d["decisions"]]')" "[('D-001', 'open', 'hold'), ('D-002', 'open', 'hold')]"
 t_eq "E-state watch recorded from the first snapshot (README PLAN docs ledgers)" "$(S 'd["watch"]')" "['README.md', 'PLAN.md', 'docs', 'thoughts/ledgers']"
@@ -3126,8 +3126,8 @@ if [ $HAVE_NODE = 1 ]; then
   t_eq "RB-page: the page script ran without error and the section is shown" "$(pj '(d["error"], d["sinceHidden"])')" "(None, False)"
   t_has "RB-page: eyebrow: Since the previous assessment · <date>" "$(pj 'd["since"][0]')" "Since the previous assessment · 20"
   t_eq "RB-page: the count line is '<N> commits · <M> uncommitted files'" "$(pj 'd["since"][1]')" "0 commits · 1 uncommitted files"
-  t_eq "RB-page: the attention row, the focus row (3.5.0, under the attention row) and both change rows" "$(pj 'd["since"][2:6]')" "['Attention · continue | Work can continue without the owner | Nothing is blocked on you', 'focus: Ship the engine import (proposed, not confirmed)', '<script>alert(1)</script> landed | landed, not checked by the map', 'Plan <b>edited</b> | uncommitted']"
-  t_eq "RB-page: not checked: ..." "$(pj 'd["since"][6]')" "not checked: <img src=x onerror=alert(1)>"
+  t_eq "RB-page: the attention row, the focus row (3.5.0), the fit row (3.6.0, under the focus row) and both change rows" "$(pj 'd["since"][2:7]')" "['Attention · continue | Work can continue without the owner | Nothing is blocked on you', 'focus: Ship the engine import (proposed, not confirmed)', 'fit: not judged', '<script>alert(1)</script> landed | landed, not checked by the map', 'Plan <b>edited</b> | uncommitted']"
+  t_eq "RB-page: not checked: ..." "$(pj 'd["since"][7]')" "not checked: <img src=x onerror=alert(1)>"
   t_eq "RB-page: the text from the repository stayed text: no script or iframe element was ever created" "$(pj '(d["scripts"], "img" in d["created"], "script" in d["created"])')" "(0, False, False)"
   mkproj rbp0 || true
   rbpage
@@ -3284,6 +3284,8 @@ fch() { python3 -I -c 'import sys,json;sys.path.insert(0,sys.argv[1]);sys.dont_w
 fcbg() { # NAME SECONDS COMMAND...: run a command in the background with stdout to $T/NAME.out, wait SECONDS before returning
   local n=$1 w=$2; shift 2; ( "$@" > "$T/$n.out" 2>&1 ) & FCP=$!; BGPIDS="$BGPIDS $FCP"; sleep "$w"
 }
+
+if [ "${PM_DR_ONLY:-}" != 1 ]; then   # sections 15 (FC-*) ... up to the `fi` before section 16
 
 # ---- FC-hash: the one identity function
 t_eq "FC-hash: sha256[:16] of the canonical JSON [outcome, done_when, sorted exclusions]; NFC; whitespace collapsed; order of exclusions irrelevant" "$(python3 -I - "$HOOKS" <<'PY'
@@ -3910,5 +3912,894 @@ t_has "FC-image: an unfinished last line completed right after the image: not ap
 t_eq "FC-image: ... nothing consumed (applied 0, accepted null) and the stale reason counts the IMAGE's one complete line" "$(S '(d["answers"]["applied"], d["intent"]["accepted"], d["stale"]["why"])')" "(0, None, '1 pending answers')"
 out=$(facts)
 t_pre "FC-image: ... the next run sees both complete lines and stages the judgement (a D- answer is never model-free)" "$out" "NEEDS_JUDGEMENT 2 pending answers inv "
+
+fi   # PM_DR_ONLY=1 skips section 15
+
+# ======================================================================================================
+# 16. 3.6.0: lost completion evidence and drift (DR-*), INTERFACES-3.2 section 15
+# ======================================================================================================
+if [ "${PM_FC_ONLY:-}" != 1 ]; then   # PM_FC_ONLY=1 stops after section 15
+HAVE_NODE=0; command -v node >/dev/null 2>&1 && HAVE_NODE=1
+rbpage() { PAGE=$(node "$TD/pm_page.js" "$PM/index.html" "$@" 2>&1); }
+pj()  { printf '%s' "$PAGE" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(eval(sys.argv[1]))' "$1"; }
+bf()  { lib brief "$PM/state.json" "$1"; }
+ax()  { AXJ=$(lib assure "$PM/state.json" "$1"); }
+axq() { printf '%s' "$AXJ" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(eval(sys.argv[1]))' "$1"; }
+fcset() { # OUTCOME DONE_WHEN [EXCLUSIONS_JSON]: append an F-set line (the owner's record) to answers.jsonl
+  python3 - "$PM/answers.jsonl" "$@" <<'PY'
+import json, sys
+p, o, d = sys.argv[1:4]
+r = {"id": "F-set", "answer": o, "note": d, "at": "2026-10-11T10:00:00+03:00", "by": "owner"}
+if len(sys.argv) > 4 and sys.argv[4]:
+    r["exclusions"] = json.loads(sys.argv[4])
+open(p, "a").write(json.dumps(r, ensure_ascii=False) + "\n")
+PY
+}
+FC_O="Ship the engine import"; FC_D="The import runs on the fixture project"   # pm_testlib.PROPOSAL, the fixed proposal every judgement makes
+ovraise() { printf '%s' 'J["decisions"][1]["resolves_when"]=['"$1"']; '"$2"; }
+ovj() { printf '%s' 'J["decisions"][0]["ready"]=True; J["decisions"][1]["overtaken"]={"why":"Owner tagged v1.0.0 and pushed by hand"}; '"$1"; }
+ISROOT=0; [ "$(id -u)" = 0 ] && ISROOT=1
+# the DR-* project: completion refs P1.c1 (file:ev/c1.md:3), P1.c2 (file:ev/c2.md), P1.c3 (commit:<init sha>) and the done parts
+# ground-truth (file:PLAN.md:295) and engine (file:ev/p1.md:2): five refs, every one resolving when the map is published
+drfiles() { mkdir -p "$R/ev"; local f; for f in c1 c2 p1 p2; do seq 1 5 > "$R/ev/$f.md"; done; (cd "$R" && git add -A && git commit -qm "evidence files"); }
+drsha() { (cd "$R" && git rev-parse --short=7 HEAD); }
+drcode() { # SHA7 [EXTRA PYTHON]: the FULL judgement edit that makes the DR plan
+  printf '%s' 'P["phases"][0]["criteria"]=[{"id":"P1.c1","text":"Weights load","done":True,"ref":"file:ev/c1.md:3"},{"id":"P1.c2","text":"Engine builds","done":True,"ref":"file:ev/c2.md"},{"id":"P1.c3","text":"Import landed","done":True,"ref":"commit:'"$1"'"}]; [p for p in J["parts"] if p["id"]=="engine"][0]["ref"]="file:ev/p1.md:2"; '"${2:-}"
+}
+DRE='[p for p in J["parts"] if p["id"]=="engine"][0]["ref"]="file:ev/p1.md:2"'   # an UPDATE copies the part as it was (the fixture parts carry other refs)
+drproj() { # NAME [EXTRA PYTHON]
+  mkrepo "$1"; drfiles; begin; pub "$(drcode "$(drsha)" "${2:-}")" full
+  case "$eo" in "PM_EMBED_OK gen "*) return 0;; *) bad "drproj $1" "$out | $eo"; return 1;; esac
+}
+drcommit() { (cd "$R" && echo "$RANDOM$RANDOM" >> docs/a.md && git add docs/a.md && git commit -qm "${1:-work}"); }
+drcrit() { S '[c for ph in d["phases"] for c in ph["criteria"] if c["id"]=="'"$1"'"][0]'; }     # one criterion of the published state
+drpart() { S '[p for p in d["parts"] if p["id"]=="'"$1"'"][0]'; }
+evrec() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]+"/cache.json")).get("evidence");print(json.dumps(d) if len(sys.argv)<3 else eval(sys.argv[2]))' "$PM" "$@"; }
+
+# ---- DR-lost-file: a completion ref that is gone is a LOSS: marked, never flipped, queued, repaired by the next judgement
+drproj dr1 || true
+t_eq "DR-lost-file: the published state carries the evidence view: 5 refs visited, none lost, key and record agree" "$(S '(d["evidence"], d["judged_key"]["evidence_lost"])')" "({'checked': 'complete', 'n': 5, 'done': 5, 'lost': [], 'unknown': []}, [])"
+t_eq "DR-lost-file: ... the publication seeded the cache record under the new generation (5 results, epoch 1)" "$(evrec 'sorted(set(r["status"] for r in d["results"].values())),len(d["results"]),d["epoch"],d["gen"]=="'$(gen)'"')" "(['ok'], 5, 1, True)"
+out=$(facts); t_eq "DR-lost-file: a later facts run with nothing moved is quiet" "${out%% *}" "NO_CHANGE"
+rm "$R/ev/c2.md"; (cd "$R" && git add -A && git commit -qm "drop c2"); begin
+t_pre "DR-lost-file: the verdict names the loss" "$out" "NEEDS_JUDGEMENT 1 new commits; completion evidence lost: P1.c2 inv "
+t_eq "DR-lost-file: ... the snapshot: one loss (criteria are listed by id), the pass is complete, the key component names it" "$(get "$STAGE/snapshot.json" '(d["evidence"]["lost"], d["evidence"]["checked"], d["evidence"]["done"], d["key"]["evidence_lost"], [e["id"] for e in d["evidence"]["ok"]])')" "([{'id': 'P1.c2', 'ref': 'file:ev/c2.md', 'why': 'file missing'}], 'complete', 5, ['P1.c2'], ['P1.c1', 'P1.c3', 'engine', 'ground-truth'])"
+t_eq "DR-lost-file: ... the pack lists it as a repair (RESERVED: before every optional detail)" "$(get "$STAGE/pack.json" '(d["repairs"], list(d).index("repairs") < list(d).index("repos"))')" "({'lost': [{'id': 'P1.c2', 'ref': 'file:ev/c2.md', 'why': 'file missing'}], 'more': 0}, True)"
+t_eq "DR-lost-file: ... the stale-stamping refresh already marked the criterion unverified (done stays true) and says why" "$(drcrit P1.c2 | sed 's/^/ /' >/dev/null; S '([c for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c2"][0].get("unverified"), [c for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c2"][0]["done"], d["evidence"]["lost"][0]["why"], d["stale"]["why"])')" "(True, True, 'file missing', '1 new commits; completion evidence lost: P1.c2')"
+t_has "DR-lost-file: ... brief line 11b names it with its ref" "$(cat "$PM/brief.txt")" "evidence lost: P1.c2 (file:ev/c2.md)"
+t_eq "DR-lost-file: ... the assurance says so (P1.c2 unverified), never 'Nothing needs you'" "$(S '(d["assurance"]["ok"], [w for w in d["assurance"]["why"] if "unverified" in w])')" "(False, ['P1.c2 unverified'])"
+if [ "$HAVE_NODE" = 1 ]; then
+  rbpage '{"focus":{"phase":"P1"}}'
+  t_eq "DR-page: the criterion row says 'completion unverified' with the reason; the others do not" "$(pj '[(c[0], c[2]) for c in d["criteria"]]')" "[('P1.c1', False), ('P1.c2', True), ('P1.c3', False)]"
+  t_has "DR-page: ... the row text" "$(pj '[c[1] for c in d["criteria"] if c[0]=="P1.c2"][0]')" "completion unverified · file missing"
+  t_eq "DR-page: the progress tile counts it, the done total is untouched" "$(pj 'd["progress"]')" "3 of 7 (1 unverified)"
+  t_has "DR-page: Plan vs shipped marks the row" "$(pj '" | ".join(d["bodies"]["Plan vs shipped"])')" "Shipped · completion unverified"
+  t_eq "DR-page: the script wrote only textContent (no script or iframe element)" "$(pj 'd["scripts"]')" "0"
+fi
+rej "DR-lost-file: a listed loss left done with its old ref is not accepted (the repair is an obligation)" 'J["criteria_updates"]=[u for u in J.get("criteria_updates",[]) if u["id"]!="P1.c2"]' "P1.c2 completion evidence is lost (file missing"
+rej "DR-lost-file: ... done:true again with the old ref does not resolve" 'J["criteria_updates"]=[{"id":"P1.c2","done":True,"ref":"file:ev/c2.md"}]' "criteria_updates P1.c2: file ref ev/c2.md is not an existing regular file"
+pub '' update
+t_pre "DR-lost-file: the default repair (done:false) publishes" "$eo" "PM_EMBED_OK"
+t_eq "DR-lost-file: ... P1.c2 is open again, nothing is lost, the key is rebased, the mark is gone" "$(S '([c for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c2"][0], d["evidence"]["lost"], d["judged_key"]["evidence_lost"], d["assurance"]["ok"])')" "({'id': 'P1.c2', 'text': 'Engine builds', 'done': False, 'ref': None}, [], [], True)"
+out=$(facts); t_eq "DR-lost-file: ... and the next run is quiet" "${out%% *}" "NO_CHANGE"
+
+# ---- DR-lost-line: the file is there, the line is not
+drproj dr2 || true
+seq 1 2 > "$R/ev/c1.md"; (cd "$R" && git add -A && git commit -qm "shrink c1"); begin
+t_pre "DR-lost-line: a ref to line 3 of a 2-line file is a loss" "$out" "NEEDS_JUDGEMENT 1 new commits; completion evidence lost: P1.c1 inv "
+t_eq "DR-lost-line: ... why: line past end" "$(get "$STAGE/snapshot.json" 'd["evidence"]["lost"]')" "[{'id': 'P1.c1', 'ref': 'file:ev/c1.md:3', 'why': 'line past end'}]"
+pub '' update; t_pre "DR-lost-line: the repair publishes" "$eo" "PM_EMBED_OK"
+
+# ---- DR-lost-commit: a commit that is no longer in any known repository (an absent answer from a repository that still works)
+mkrepo dr3; drfiles; (cd "$R" && git checkout -q -b side && echo s > side.txt && git add -A && git commit -qm side && git checkout -q main)
+SIDE=$(cd "$R" && git rev-parse --short=7 side); begin; pub "$(drcode "$SIDE")" full
+t_pre "DR-lost-commit: setup: the map cites a commit that exists" "$eo" "PM_EMBED_OK"
+(cd "$R" && git branch -q -D side && git reflog expire --expire=now --all && git gc -q --prune=now); begin
+t_pre "DR-lost-commit: the pruned commit is a loss" "$out" "NEEDS_JUDGEMENT completion evidence lost: P1.c3 inv "
+t_eq "DR-lost-commit: ... why: commit missing" "$(get "$STAGE/snapshot.json" '[(e["id"], e["why"]) for e in d["evidence"]["lost"]]')" "[('P1.c3', 'commit missing')]"
+pub '' update; t_pre "DR-lost-commit: the repair publishes" "$eo" "PM_EMBED_OK"
+
+# ---- DR-lost-part: a done part is a completion ref too
+drproj dr4 || true
+rm "$R/ev/p1.md"; (cd "$R" && git add -A && git commit -qm "drop p1"); begin
+t_pre "DR-lost-part: the verdict names the part" "$out" "NEEDS_JUDGEMENT 1 new commits; completion evidence lost: engine inv "
+t_eq "DR-lost-part: ... pack repairs and state: unverified, still done" "$(get "$STAGE/pack.json" 'd["repairs"]["lost"]')|$(S '(d["parts"][[p["id"] for p in d["parts"]].index("engine")]["unverified"], d["parts"][[p["id"] for p in d["parts"]].index("engine")]["status"])')" "[{'id': 'engine', 'ref': 'file:ev/p1.md:2', 'why': 'file missing'}]|(True, 'done')"
+t_has "DR-lost-part: ... brief line 11b" "$(cat "$PM/brief.txt")" "evidence lost: engine (file:ev/p1.md:2)"
+rej "DR-lost-part: a listed part left done with its old ref" '[p for p in J["parts"] if p["id"]=="engine"][0].update(status="done", ref="file:ev/p1.md:2")' "engine completion evidence is lost (file missing"
+pub '[p for p in J["parts"] if p["id"]=="engine"][0].update(status="done", ref="file:ev/p2.md:2")' update
+t_pre "DR-lost-part: a new resolving ref repairs it" "$eo" "PM_EMBED_OK"
+t_eq "DR-lost-part: ... still done, not unverified, nothing lost, the key rebased" "$(S '([p for p in d["parts"] if p["id"]=="engine"][0].get("unverified"), d["evidence"]["lost"], d["judged_key"]["evidence_lost"])')" "(None, [], [])"
+t_true "DR-lost-part: ... judgement.json (the model's file) carries no script mark" "! grep -q unverified $PM/current/judgement.json"
+
+# ---- DR-queue: 24 lost criteria + 1 lost done part: batches of 12, the rest carried verbatim as unverified
+mkrepo drq; drfiles; for i in $(seq -w 1 24); do echo x > "$R/ev/q$i.md"; done; (cd "$R" && git add -A && git commit -qm "q files"); begin
+DRQ='P["phases"]=[{"id":"P%d"%(i+1),"label":"Phase %d"%(i+1),"criteria":[{"id":"P%d.c%d"%(i+1,j+1),"text":"Criterion %d.%d"%(i+1,j+1),"done":True,"ref":"file:ev/q%02d.md"%(i*8+j+1)} for j in range(8)]} for i in range(3)]+[{"id":"P4","label":"Later","criteria":[{"id":"P4.c1","text":"Open one","done":False}]}]; [p for p in J["parts"] if p["id"]=="engine"][0]["ref"]="file:ev/p1.md:2"'
+pub "$DRQ" full; t_pre "DR-queue: setup: 24 done criteria and a done part publish" "$eo" "PM_EMBED_OK"
+rm "$R"/ev/q*.md "$R/ev/p1.md"; (cd "$R" && git add -A && git commit -qm "lose everything"); begin
+t_pre "DR-queue: 25 losses: the verdict names the first three and counts the rest" "$out" "NEEDS_JUDGEMENT 1 new commits; completion evidence lost: P1.c1, P1.c2, P1.c3 +22 inv "
+t_true "DR-queue: ... the pack with 12 repairs and the reserved drift stays inside 8192 bytes" "[ \$(wc -c < $STAGE/pack.json) -le 8192 ]"
+t_eq "DR-queue: ... the pack lists the first 12 (criteria by id), 13 more wait" "$(get "$STAGE/pack.json" '([e["id"] for e in d["repairs"]["lost"]], d["repairs"]["more"])')" "(['P1.c1', 'P1.c2', 'P1.c3', 'P1.c4', 'P1.c5', 'P1.c6', 'P1.c7', 'P1.c8', 'P2.c1', 'P2.c2', 'P2.c3', 'P2.c4'], 13)"
+rej "DR-queue: an UNLISTED loss cannot be recertified with its old ref" 'J["criteria_updates"]=J.get("criteria_updates",[])+[{"id":"P3.c1","done":True,"ref":"file:ev/q17.md"}]' "criteria_updates P3.c1: file ref ev/q17.md is not an existing regular file"
+pub "$DRE" update; t_pre "DR-queue: the first batch is repaired; the 13 others are carried verbatim and publish" "$eo" "PM_EMBED_OK"
+t_eq "DR-queue: ... 13 carried: judged key, evidence view and marks agree (12 criteria + the part), still done" "$(S '(len(d["judged_key"]["evidence_lost"]), len(d["evidence"]["lost"]), sum(1 for ph in d["phases"] for c in ph["criteria"] if c.get("unverified") and c["done"]), [p.get("unverified") for p in d["parts"] if p["id"]=="engine"])')" "(13, 13, 12, [True])"
+t_eq "DR-queue: ... the assurance names the first and counts the others" "$(S '[w for w in d["assurance"]["why"] if "unverified" in w]')" "['P2.c5 unverified +12']"
+out=$(facts); t_pre "DR-queue: the carried ones force the next batch (repairs left)" "$out" "NEEDS_JUDGEMENT 13 completion repairs pending inv "; INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "DR-queue: ... the second pack lists the next 12 (P2.c5 ...), one more waits" "$(get "$STAGE/pack.json" '([e["id"] for e in d["repairs"]["lost"]][:2], len(d["repairs"]["lost"]), d["repairs"]["more"])')" "(['P2.c5', 'P2.c6'], 12, 1)"
+pub "$DRE" update; t_pre "DR-queue: the second batch publishes" "$eo" "PM_EMBED_OK"
+out=$(facts); t_pre "DR-queue: only the part is left (1 repair pending)" "$out" "NEEDS_JUDGEMENT 1 completion repairs pending inv "; INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "DR-queue: ... the third pack lists exactly that part" "$(get "$STAGE/pack.json" '(d["repairs"]["lost"], d["repairs"]["more"])')" "([{'id': 'engine', 'ref': 'file:ev/p1.md:2', 'why': 'file missing'}], 0)"
+pub '' update; t_pre "DR-queue: the last repair publishes (the listed part stops being done)" "$eo" "PM_EMBED_OK"
+t_eq "DR-queue: ... nothing is lost or marked any more" "$(S '(d["evidence"]["lost"], d["judged_key"]["evidence_lost"], len(__import__("json").loads(__import__("json").dumps(d))["parts"]), [p.get("unverified") for p in d["parts"]])')" "([], [], 6, [None, None, None, None, None, None])"
+out=$(facts); t_eq "DR-queue: ... and the next run is NO_CHANGE" "${out%% *}" "NO_CHANGE"
+
+# ---- DR-cursor: ONE fair schedule (least recently checked first, unvisited first), 40 checks per pass; driven pass by pass
+mkrepo drc; mkdir -p "$R/.project-map" "$R/ev"; for i in $(seq -w 1 60); do echo x > "$R/ev/r$i.md"; done; rm "$R/ev/r55.md"
+t_eq "DR-cursor: 60 refs, cap 40: the first pass is partial, the loss at ref 55 is found by the second, the set change and the repair follow" "$(python3 -I - "$HOOKS" "$R" <<'PY'
+import sys, os, time, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+root = sys.argv[2]
+items = [("P%d.c%d" % (i // 8 + 1, i % 8 + 1), "file:ev/r%02d.md" % (i + 1)) for i in range(56)] + [(n, "file:ev/r%02d.md" % (57 + k)) for k, n in enumerate(["engine", "ground-truth", "qualification", "upstream"])]
+gen, cache = "000001-aaaaaaaa", {}
+run = lambda its, g=gen: K.check_evidence(root, [], its, cache, time.monotonic() + 30, g)
+v1, r1 = run(items)
+v2, r2 = run(items)
+out = [(len(r1), v1["checked"], v1["done"], v1["lost"]), (len(r2), v2["checked"], v2["done"], [e["id"] for e in v2["lost"]], v2["lost"][0]["why"])]
+sid = cache["evidence"]["set"]
+extra = items[:59] + [("P8.c1", "file:ev/r60.md")]   # the set changes: one ref swapped
+v3, r3 = run(extra)
+out.append((cache["evidence"]["set"] != sid, len(cache["evidence"]["results"]), v3["done"], v3["checked"], "P8.c1|file:ev/r60.md" in r3))
+open(root + "/ev/r55.md", "w").write("x\n")   # the loss is repaired in the world; the record learns it when the turn of that ref comes
+n = 0
+while any(e["id"] == "P7.c7" for e in v3["lost"]) and n < 5:
+    v3, _r = run(extra); n += 1
+out.append((n <= 2, [e["id"] for e in v3["lost"]]))
+print(json.dumps(out))
+PY
+)" '[[40, "partial", 40, []], [40, "complete", 60, ["P7.c7"], "file missing"], [true, 60, 60, "complete", true], [true, []]]'
+if [ "$ISROOT" = 0 ]; then
+mkrepo drc2; mkdir -p "$R/.project-map" "$R/ev/lk"; for i in $(seq -w 1 60); do if [ "$i" -le 40 ]; then echo x > "$R/ev/lk/r$i.md"; else echo x > "$R/ev/r$i.md"; fi; done; rm "$R/ev/r55.md"; chmod 000 "$R/ev/lk"
+t_eq "DR-cursor: the 40 first refs stay unreadable (unknown, never lost): the loss at ref 55 is still found within two passes" "$(python3 -I - "$HOOKS" "$R" <<'PY'
+import sys, time, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+root = sys.argv[2]
+items = [("P%d.c%d" % (i // 8 + 1, i % 8 + 1), ("file:ev/lk/r%02d.md" if i < 40 else "file:ev/r%02d.md") % (i + 1)) for i in range(56)] + [(n, "file:ev/r%02d.md" % (57 + k)) for k, n in enumerate(["engine", "ground-truth", "qualification", "upstream"])]
+cache = {}
+v1, _ = K.check_evidence(root, [], items, cache, time.monotonic() + 30, "000001-aaaaaaaa")
+v2, _ = K.check_evidence(root, [], items, cache, time.monotonic() + 30, "000001-aaaaaaaa")
+print(json.dumps([(v1["checked"], len(v1["unknown"]), v1["lost"]), (v2["checked"], [e["id"] for e in v2["lost"]], len(v2["unknown"]))]))
+PY
+)" '[["partial", 40, []], ["partial", ["P7.c7"], 40]]'
+chmod 755 "$R/ev/lk"
+else echo "SKIP DR-cursor unreadable refs (running as root)"; fi
+
+# ---- DR-cache-merge: the merge rules (pure), the one critical section (gated), a busy lock
+t_eq "DR-cache-merge: older gen discards; newer gen / changed set replaces and keeps the keys still in the set; the higher epoch wins; an equal epoch by rank" "$(python3 -I - "$HOOKS" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+def rec(gen, sid, epoch, **res):
+    return {"set": sid, "gen": gen, "epoch": epoch, "results": {k: {"status": v[0], "why": "", "at": "t", "epoch": v[1]} for k, v in res.items()}}
+st = lambda r: {k: (v["status"], v["epoch"]) for k, v in r["results"].items()}
+out = []
+out.append(st(K.evidence_merge(rec("000002-b", "S", 5, a=("lost", 5)), rec("000001-a", "S", 9, a=("ok", 9)), {"a"})))                       # older gen: its own results are discarded
+m = K.evidence_merge(rec("000001-a", "S", 2, a=("lost", 2), b=("ok", 2)), rec("000002-b", "T", 3, c=("ok", 3)), {"a", "c"})                    # newer gen, changed set
+out.append((st(m), m["set"], m["gen"], m["epoch"]))
+m = K.evidence_merge(rec("000002-b", "S", 2, a=("lost", 2), b=("ok", 2)), rec("000002-b", "T", 3, c=("ok", 3)), {"a", "c"})                    # same gen, changed set
+out.append((st(m), m["set"]))
+out.append(st(K.evidence_merge(rec("000002-b", "S", 5, a=("lost", 5)), rec("000002-b", "S", 4, a=("ok", 4)), {"a"})))                          # an OLDER epoch never overrides a newer loss
+out.append(st(K.evidence_merge(rec("000002-b", "S", 5, a=("lost", 5)), rec("000002-b", "S", 6, a=("ok", 6)), {"a"})))                          # a later successful check does
+out.append([st(K.evidence_merge(rec("000002-b", "S", 5, a=(x, 5)), rec("000002-b", "S", 5, a=(y, 5)), {"a"}))["a"][0] for x, y in (("ok", "lost"), ("lost", "ok"), ("ok", "unknown"), ("unknown", "lost"))])
+out.append(K.evidence_merge(None, rec("000001-a", "S", 1, a=("ok", 1)), {"a"})["epoch"])
+print(json.dumps(out))
+PY
+)" '[{"a": ["lost", 5]}, [{"a": ["lost", 2], "c": ["ok", 3]}, "T", "000002-b", 3], [{"a": ["lost", 2], "c": ["ok", 3]}, "T"], {"a": ["lost", 5]}, {"a": ["ok", 6]}, ["lost", "lost", "unknown", "lost"], 1]'
+
+t_eq "DR-cache-merge: a pass whose generation is OLDER than the stored one discards its own results: it checks nothing and the record is untouched" "$(python3 -I - "$HOOKS" "$R" <<'PY'
+import sys, os, time, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+root = sys.argv[2]
+os.makedirs(root + "/.project-map", exist_ok=True); os.makedirs(root + "/ev", exist_ok=True); open(root + "/ev/x.md", "w").write("x\n")
+items = [("P1.c1", "file:ev/x.md")]
+rec = {"set": K.evidence_set(items), "gen": "000009-zzzzzzzz", "epoch": 7, "results": {"P1.c1|file:ev/x.md": {"status": "lost", "why": "file missing", "at": "t", "epoch": 7}}}
+json.dump({"evidence": rec}, open(root + "/.project-map/cache.json", "w"))
+view, ran = K.check_evidence(root, [], items, {}, time.monotonic() + 5, "000001-aaaaaaaa")
+print(json.dumps([ran, view["lost"] and view["lost"][0]["id"], json.load(open(root + "/.project-map/cache.json"))["evidence"] == rec]))
+PY
+)" '[{}, "P1.c1", true]'
+drproj drm || true
+E0=$(evrec 'd["epoch"]')
+GATE="$T/drm.gate"; rm -f "$GATE" "$GATE.go"
+( PM_EVIDENCE_GATE="$GATE" python3 "$HOOKS/project-map-facts.py" "$R" > "$T/drm-a.out" 2>&1 ) & DRMP=$!; BGPIDS="$BGPIDS $DRMP"
+for i in $(seq 1 200); do [ -e "$GATE" ] && break; sleep 0.05; done
+t_true "DR-cache-merge: facts A reached the gate inside its critical section" "[ -e $GATE ]"
+outB=$(facts)
+t_eq "DR-cache-merge: facts B met a busy lock: the pass is skipped, the record is untouched, nothing is claimed" "$(evrec 'd["epoch"]'):${outB%% *}" "$E0:NO_CHANGE"
+touch "$GATE.go"; wait $DRMP 2>/dev/null
+t_eq "DR-cache-merge: A's pass completed after the gate: the epoch moved up by exactly one" "$(evrec 'd["epoch"]')" "$((E0 + 1))"
+rm "$R/ev/c1.md"; (cd "$R" && git add -A && git commit -qm "drop c1"); outC=$(facts)
+t_eq "DR-cache-merge: the file deleted between the passes: the next pass records the loss at a higher epoch, no ok survives for it" "$(evrec 'd["results"]["P1.c1|file:ev/c1.md:3"]["status"],d["results"]["P1.c1|file:ev/c1.md:3"]["epoch"] > '$((E0 + 1))):${outC%% *}" "('lost', True):NEEDS_JUDGEMENT"
+
+# ---- DR-fp-routes: ONE content fingerprint per file, frozen at collection, whichever route makes the file eligible
+mkrepo drf; echo base > "$R/zz.md"; (cd "$R" && git add -A && git commit -qm zz); begin; pub 'J["watch"]=["PLAN.md","zz.md"]' full
+for i in $(seq -w 1 24); do echo "dirty $i" > "$R/d$i"; done; echo "changed" >> "$R/zz.md"
+FPZ=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$R/zz.md"); FPD=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$R/d03")
+begin
+t_eq "DR-fp-routes: a watched file (not among the 20 retained dirty paths) and a retained dirty path each have one fingerprint; a directory and a path beyond 20 have none" "$(get "$STAGE/snapshot.json" '(d["file_fp"]["zz.md"], d["file_fp"]["d03"], "d21" in d["file_fp"], "docs" in d["file_fp"], len(d["dirty_paths"]))')" "({'fp': '$FPZ', 'status': 'verified'}, {'fp': '$FPD', 'status': 'verified'}, False, False, 20)"
+ID1=$(python3 -I - "$HOOKS" "$STAGE" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_validate as V
+snap = json.load(open(sys.argv[2] + "/snapshot.json")); pack = json.load(open(sys.argv[2] + "/pack.json"))
+print(V.resolve_observation("file:zz.md", snap, pack)[0], V.resolve_observation("file:d03:7", snap, pack)[0], V.resolve_observation("file:docs", snap, pack)[1][:40], V.resolve_observation("file:d22", snap, pack)[1][:40])
+PY
+)
+t_eq "DR-fp-routes: ... the observation identity is path + fingerprint (a line number is not part of it); a directory or a path the pack did not list is no evidence" "$(printf '%s' "$ID1" | sed 's/ *$//')" "file:zz.md:$FPZ file:d03:$FPD file docs is not a changed file the pack file d22 is not a changed file the pack"
+(cd "$R" && git add d01 d02 d03 d04 d05 d06 d07 d08 d09 d10 d11 d12 d13 d14 d15 d16 d17 d18 d19 d20 && git commit -qm "commit twenty"); begin
+t_eq "DR-fp-routes: after the earlier dirty paths were committed the same file enters the retained dirty list: the SAME fingerprint, one entry" "$(get "$STAGE/snapshot.json" '(d["file_fp"]["zz.md"]["fp"], "zz.md" in d["dirty_paths"], d["file_fp"]["d21"]["fp"] != "", "d03" in d["file_fp"])')" "('$FPZ', True, True, False)"
+ID2=$(python3 -I - "$HOOKS" "$STAGE" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_validate as V
+snap = json.load(open(sys.argv[2] + "/snapshot.json")); pack = json.load(open(sys.argv[2] + "/pack.json"))
+print(V.resolve_observation("file:zz.md", snap, pack)[0])
+PY
+)
+t_eq "DR-fp-routes: ... so the observation identity does not depend on the route" "$ID2" "file:zz.md:$FPZ"
+
+# ---- DR-restore: carried (unlisted) losses restored by the owner between batches clear mechanically
+mkrepo drq2; printf 'ign/\n' >> "$R/.gitignore"; mkdir -p "$R/ign"; for i in $(seq -w 1 16); do echo x > "$R/ign/q$i.md"; done; echo p > "$R/ign/p1.md"; (cd "$R" && git add -A && git commit -qm "ign setup"); begin
+DRQ2='P["phases"]=[{"id":"P%d"%(i+1),"label":"Phase %d"%(i+1),"criteria":[{"id":"P%d.c%d"%(i+1,j+1),"text":"Criterion %d.%d"%(i+1,j+1),"done":True,"ref":"file:ign/q%02d.md"%(i*8+j+1)} for j in range(8)]} for i in range(2)]+[{"id":"P3","label":"Later","criteria":[{"id":"P3.c1","text":"Open one","done":False}]}]; [p for p in J["parts"] if p["id"]=="engine"][0]["ref"]="file:ign/p1.md"'
+pub "$DRQ2" full; t_pre "DR-restore: setup" "$eo" "PM_EMBED_OK"
+rm "$R"/ign/q0[1-9].md "$R"/ign/q1[0-4].md; begin
+t_pre "DR-restore: 14 losses with no change visible to git: only the evidence moves the key" "$out" "NEEDS_JUDGEMENT completion evidence lost: P1.c1, P1.c2, P1.c3 +11 inv "
+DRE2='[p for p in J["parts"] if p["id"]=="engine"][0]["ref"]="file:ign/p1.md"'
+pub "$DRE2" update; t_pre "DR-restore: the first batch of 12 publishes; P2.c5 and P2.c6 are carried" "$eo" "PM_EMBED_OK"
+t_eq "DR-restore: ... carried and unverified" "$(S '(d["judged_key"]["evidence_lost"], [c["id"] for ph in d["phases"] for c in ph["criteria"] if c.get("unverified")])')" "(['P2.c5', 'P2.c6'], ['P2.c5', 'P2.c6'])"
+echo x > "$R/ign/q13.md"; echo x > "$R/ign/q14.md"
+out=$(facts)
+t_eq "DR-restore: the owner restored both carried files: the evidence view changed, no key moved (R6)" "$out" "NEEDS_REFRESH evidence status changed"
+t_eq "DR-restore: ... the mechanical refresh cleared the marks, emptied the lost list and rebased the key" "$(S '(d["judged_key"]["evidence_lost"], d["evidence"]["lost"], [c["id"] for ph in d["phases"] for c in ph["criteria"] if c.get("unverified")], d["stale"])')" "([], [], [], None)"
+out=$(facts); t_eq "DR-restore: ... and the run after that is NO_CHANGE" "${out%% *}" "NO_CHANGE"
+t_eq "DR-restore: compare_keys (R6) unit: a NEW loss moves; a carried one still lost moves ('repairs pending'); a loss that left the set does not" "$(python3 -I - "$HOOKS" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+def cmp(judged, fresh):
+    j = {"heads": {}, "watch_hashes": {}, "release": {}, "evidence_lost": judged}
+    k = {"heads": {}, "watch_hashes": {}, "release": {}, "evidence_lost": fresh}
+    r = K.compare_keys(j, k, {"commits": {"count": 0}, "answers": {"pending": []}, "key": k})
+    return ("evidence_lost" in r["moved"], r["why"])
+print(json.dumps([cmp([], ["a"]), cmp(["a"], ["a"]), cmp(["a", "b"], ["b"]), cmp(["a", "b"], []), cmp(["a"], ["a", "c"])]))
+PY
+)" '[[true, "completion evidence lost: a"], [true, "1 completion repairs pending"], [true, "1 completion repairs pending"], [false, ""], [true, "completion evidence lost: c; 1 completion repairs pending"]]'
+
+t_eq "DR-restore: marks are cleared ONLY by an ok result (unit): lost keeps it, unknown or unvisited keeps it, ok clears it, an item no longer done clears it" "$(python3 -I - "$HOOKS" <<'PY'
+import sys, json, copy
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_validate as V
+def state():
+    return {"phases": [{"id": "P1", "criteria": [{"id": "P1.c1", "done": True, "ref": "file:a", "unverified": True}, {"id": "P1.c2", "done": True, "ref": "file:b", "unverified": True}]}],
+            "parts": [{"id": "engine", "status": "done", "ref": "file:c", "unverified": True}, {"id": "later", "status": "in_progress", "ref": "file:d", "unverified": True}]}
+def run(ev):
+    T = state(); V.apply_evidence(T, dict({"checked": "partial", "n": 3, "done": 1, "lost": [], "unknown": [], "ok": []}, **ev)); return V.unverified_ids(T)
+print(json.dumps([run({"lost": [{"id": "P1.c1", "ref": "file:a", "why": "file missing"}]}),   # still lost: kept; the others are unvisited: kept; the part no longer done: cleared
+                  run({"unknown": ["P1.c1"]}),
+                  run({"ok": [{"id": "P1.c1", "ref": "file:a"}, {"id": "engine", "ref": "file:c"}]}),
+                  run({"ok": [{"id": "P1.c1", "ref": "file:OTHER"}]})]))
+PY
+)" '[["P1.c1", "P1.c2", "engine"], ["P1.c1", "P1.c2", "engine"], ["P1.c2"], ["P1.c1", "P1.c2", "engine"]]'
+
+# ---- DR-unknown / DR-refresh: a ref that cannot be read is UNKNOWN (never lost, never marked); the view change is a refresh, not a judgement
+if [ "$ISROOT" = 0 ]; then
+mkrepo dru; printf 'ign/\n' >> "$R/.gitignore"; mkdir -p "$R/ign"; echo x > "$R/ign/u1.md"; echo x > "$R/ign/u2.md"; echo p > "$R/ign/p1.md"; (cd "$R" && git add -A && git commit -qm "ign setup"); begin
+pub 'P["phases"][0]["criteria"]=[{"id":"P1.c1","text":"One","done":True,"ref":"file:ign/u1.md"},{"id":"P1.c2","text":"Two","done":True,"ref":"file:ign/u2.md"}]; [p for p in J["parts"] if p["id"]=="engine"][0]["ref"]="file:ign/p1.md"' full
+t_pre "DR-unknown: setup" "$eo" "PM_EMBED_OK"
+chmod 000 "$R/ign"; out=$(facts)
+t_eq "DR-refresh: three refs cannot be read: no key moves, the view changes, so the answer is a mechanical refresh" "$out" "NEEDS_REFRESH evidence status changed"
+t_eq "DR-unknown: ... partial, three unknown, nothing lost, no item marked, the key untouched" "$(S '(d["evidence"]["checked"], d["evidence"]["unknown"], d["evidence"]["lost"], [c["id"] for ph in d["phases"] for c in ph["criteria"] if c.get("unverified")], d["judged_key"]["evidence_lost"])')" "('partial', ['P1.c1', 'P1.c2', 'engine'], [], [], [])"
+t_eq "DR-unknown: ... the assurance and line 2 of the brief say the check is incomplete" "$(S '[w for w in d["assurance"]["why"] if "evidence" in w]'):$(sed -n 2p "$PM/brief.txt" | grep -c 'evidence check incomplete')" "['evidence check incomplete']:1"
+out=$(facts); t_eq "DR-unknown: the same unreadable world again is stable (the pass re-checks, the view is the same)" "${out%% *}" "NO_CHANGE"
+chmod 755 "$R/ign"; out=$(facts)
+t_eq "DR-unknown: readable again: the next refresh completes the check" "$out:$(S '(d["evidence"]["checked"], d["evidence"]["unknown"])')" "NEEDS_REFRESH evidence status changed:('complete', [])"
+else echo "SKIP DR-unknown (running as root)"; fi
+
+# ---- DR-publish-recheck: a check made at publication is part of the published state
+drproj dr5 || true; bump; begin
+rm "$R/ev/c1.md"          # the file vanishes while the judgement is being written
+pub "$DRE" update
+t_has "DR-publish-recheck: the embed says the map is behind and why" "$eo" "PM_EMBED_STALE completion evidence lost: P1.c1"
+t_eq "DR-publish-recheck: ... the item is published unverified (done untouched), listed lost, with the recheck coverage stored" "$(S '([c for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c1"][0], d["evidence"])')" "({'id': 'P1.c1', 'text': 'Weights load', 'done': True, 'ref': 'file:ev/c1.md:3', 'unverified': True}, {'checked': 'complete', 'n': 5, 'done': 5, 'lost': [{'id': 'P1.c1', 'ref': 'file:ev/c1.md:3', 'why': 'file missing'}], 'unknown': [], 'recheck': {'done': 5, 'n': 5}})"
+t_eq "DR-publish-recheck: ... stale why, the judged key (the loss is carried), the assurance" "$(S '(d["stale"]["why"], d["judged_key"]["evidence_lost"], d["assurance"]["ok"], [w for w in d["assurance"]["why"] if "unverified" in w])')" "('completion evidence lost: P1.c1', ['P1.c1'], False, ['P1.c1 unverified'])"
+t_has "DR-publish-recheck: ... and the brief shows both" "$(sed -n 2p "$PM/brief.txt")|$(grep '^evidence lost' "$PM/brief.txt")" "behind: completion evidence lost: P1.c1"
+t_eq "DR-publish-recheck: the cache record holds the recheck's loss (a later pass cannot lose it to an earlier ok)" "$(evrec 'd["results"]["P1.c1|file:ev/c1.md:3"]["status"]')" "lost"
+out=$(facts)
+t_pre "DR-publish-recheck: the next run re-judges (the loss is carried; the file also left the working tree)" "$out" "NEEDS_JUDGEMENT working tree changed; 1 completion repairs pending inv "
+# an incomplete recheck is part of the assurance, and the next refresh replaces it
+drproj dr6 || true; bump; begin
+PM_EMBED_EVIDENCE_DEADLINE=0 pub "$DRE" update
+t_eq "DR-publish-recheck: nothing could be rechecked in time: recheck 0 of 5 stored" "$(S '(d["evidence"]["recheck"], d["evidence"]["lost"], d["stale"])')" "({'done': 0, 'n': 5}, [], None)"
+t_eq "DR-publish-recheck: ... the assurance says so" "$(S '[w for w in d["assurance"]["why"] if "recheck" in w]')" "['publication recheck 0 of 5']"
+out=$(facts)
+t_eq "DR-publish-recheck: ... the next facts run replaces it by a pass of its own (a refresh, not a judgement)" "$out:$(S '"recheck" in d["evidence"]')" "NEEDS_REFRESH evidence status changed:False"
+out=$(facts); t_eq "DR-publish-recheck: ... and then it is quiet" "${out%% *}" "NO_CHANGE"
+
+# ---- DR-fit: judgement.fit (15.2): required when there is an intent and a baseline, evidence only from what the pack supplied
+DRDEC='{"id":"D-010","q":"The work moved away from the focus: keep it?","options":[{"id":"A","label":"Keep the focus"},{"id":"B","label":"Revise the focus (then say the new one)"},{"id":"C","label":"Unclear, keep watching"}],"recommended":None,"default":"hold","hard_rule":None,"deadline":None,"ready":True,"about":"drift"}'
+drdep()   { printf '%s' 'J["fit"]={"verdict":"departure","concern":"The new work is not the import","evidence":["'"$1"'"]'"${2:+,\"exclusion\":$2}"'}'; }   # EVIDENCE_REF [EXCLUSION]
+drraise() { printf '%s' "$(drdep "$@"); J[\"decisions\"].append($DRDEC)"; }
+drcarry() { printf '%s' "J[\"decisions\"].append($DRDEC)"; }
+drdrift() { S 'json.dumps(d["intent"].get("drift"), sort_keys=True)'; }
+mkrepo drf0; begin
+rej "DR-fit: a first map (no baseline) must not carry fit" 'J["fit"]={"verdict":"unknown"}' "fit must be absent or null" full
+drproj drf1 || true
+drcommit work1; SHA1=$(drsha); bump; begin
+t_eq "DR-fit: the pack the model reads carries what a departure may cite (commit items, dirty paths)" "$(get "$STAGE/pack.json" '([i["h"] for dd in d["commits"]["days"] for i in dd["items"]], d["dirty_paths"])')" "(['$SHA1'], ['PLAN.md'])"
+rej "DR-fit: required when the pack carries an intent and a baseline" 'del J["fit"]' "fit is required"
+rej "DR-fit: unknown verdict" 'J["fit"]={"verdict":"maybe"}' "fit.verdict must be one of consistent|departure|unknown"
+rej "DR-fit: unknown keys" 'J["fit"]={"verdict":"unknown","score":3}' "fit has unknown keys: score"
+rej "DR-fit: consistent carries no concern" 'J["fit"]={"verdict":"consistent","concern":"fine"}' "fit.concern belongs to a departure only"
+rej "DR-fit: unknown carries no evidence" 'J["fit"]={"verdict":"unknown","evidence":["commit:'$SHA1'"]}' "fit.evidence belongs to a departure only"
+rej "DR-fit: a departure needs a concern" 'J["fit"]={"verdict":"departure","evidence":["commit:'$SHA1'"]}' "fit.concern is required for a departure"
+rej "DR-fit: a departure needs evidence" 'J["fit"]={"verdict":"departure","concern":"x"}' "fit.evidence is required for a departure"
+rej "DR-fit: at most three evidence refs" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["commit:'$SHA1'","file:PLAN.md","commit:'$SHA1'","file:PLAN.md"]}' "fit.evidence has 4 entries, allowed 1..3"
+rej "DR-fit: concern over 160 bytes" 'J["fit"]={"verdict":"departure","concern":"x"*161,"evidence":["commit:'$SHA1'"]}' "fit.concern must be 1..160 bytes"
+rej "DR-fit: a secret-shaped concern" 'J["fit"]={"verdict":"departure","concern":"deploy with AKIAABCDEFGHIJKLMNOP","evidence":["commit:'$SHA1'"]}' "judgement.fit.concern looks like it contains a secret"
+rej "DR-fit: evidence from OUTSIDE the pack: a commit it did not list" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["commit:1234567"]}' "fit.evidence[1]: commit 1234567 is not one of the commits the pack listed (fit evidence must be an observation the pack supplied)"
+rej "DR-fit: evidence from outside the pack: a clean file" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["file:README.md"]}' "file README.md is not a changed file the pack listed"
+rej "DR-fit: evidence from outside the pack: a path that is not a file ref at all" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["README.md"]}' "ref must start with commit: or file:"
+rej "DR-fit: the same observation twice (a re-spelled ref is the same identity)" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["file:PLAN.md","file:PLAN.md:5"]}' "fit.evidence[2] repeats an observation already listed"
+rej "DR-fit: an exclusion index needs the owner's exclusions" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["commit:'$SHA1'"],"exclusion":0}' "fit.exclusion 0 is not an index into the owner's exclusions (0)"
+pub '' update; t_pre "DR-fit: unknown with no evidence is always legal" "$eo" "PM_EMBED_OK"
+t_eq "DR-fit: ... state.fit for an unknown verdict" "$(S 'd["fit"]')" "{'verdict': 'unknown', 'concern': None, 'evidence': [], 'observations': [], 'exclusion': None, 'scope': {'shown': 1, 'total': 1}, 'against': 'proposed'}"
+drcommit work2; SHA2=$(drsha); bump; begin
+pub "$(drdep "commit:$SHA2")" update; t_pre "DR-fit: a departure citing a commit the pack listed publishes" "$eo" "PM_EMBED_OK"
+OID2=$(cd "$R" && git rev-parse HEAD)
+t_eq "DR-fit: ... state.fit: the refs as written, the observation identities from the staged snapshot, the scope shown, against the proposal" "$(S 'd["fit"]')" "{'verdict': 'departure', 'concern': 'The new work is not the import', 'evidence': ['commit:$SHA2'], 'observations': ['commit:.:$OID2'], 'exclusion': None, 'scope': {'shown': 1, 'total': 1}, 'against': 'proposed'}"
+t_eq "DR-proposed-quiet: against a proposal only: no drift record" "$(drdrift)" "null"
+t_has "DR-fit: brief line 5b" "$(cat "$PM/brief.txt")" "fit: The new work is not the import"
+t_has "DR-fit: handoff line 9b" "$(cat "$PM/handoff.txt")" "Fit (against the map's proposal): The new work is not the import"
+if [ "$HAVE_NODE" = 1 ]; then rbpage
+  t_has "DR-page: the #since section says departure, against the proposal" "$(pj 'd["fit"][0][1]')" "fit: departure from the map's proposal · The new work is not the import"
+fi
+drcommit work3; bump; begin
+rej "DR-proposed-quiet: no drift decision without a confirmed focus" "$(drraise "file:PLAN.md")" "there is no confirmed focus to drift from"
+rej "DR-fit: a drift attention needs a departure" 'J["since"]={"changes":[],"attention":{"kind":"drift","text":"t","why":"w"},"not_checked":[]}' "since.attention.kind drift needs fit.verdict departure"
+pub "$(drdep "file:PLAN.md"); "'J["since"]={"changes":[],"attention":{"kind":"drift","text":"The work left the focus","why":"A second look is cheap"},"not_checked":[]}' update
+t_pre "DR-fit: ... a departure may set the attention to drift" "$eo" "PM_EMBED_OK"
+t_eq "DR-fit: ... which the assurance reports; the brief shows attention and fit" "$(S '(d["since"]["attention"]["kind"], [w for w in d["assurance"]["why"] if "attention" in w])')|$(grep -c '^attention: The work left the focus' "$PM/brief.txt")$(grep -c '^fit:' "$PM/brief.txt")" "('drift', ['attention: drift'])|11"
+
+# ---- DR-frozen-fp: the observation identity is the one frozen at staging
+drproj drz || true
+echo "first" >> "$R/docs/a.md"; begin
+FP1=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$R/docs/a.md")
+echo "second" >> "$R/docs/a.md"
+pub "$(drdep "file:docs/a.md")" update; t_pre "DR-frozen-fp: setup: the file changed between staging and validation" "$eo" "PM_EMBED_OK"
+t_eq "DR-frozen-fp: the identity is the staged one, not the one the file has now" "$(S 'd["fit"]["observations"]')" "['file:docs/a.md:$FP1']"
+
+# ---- DR-streak: a second departure on distinct new work (or an exclusion) is what makes a drift decision eligible; the gate
+drraise2() { printf '%s' "$(drdep "$@"); J[\"decisions\"].append(dict($DRDEC, id=\"D-011\"))"; }
+drproj drs || true
+fcset "$FC_O" "$FC_D"; out=$(facts); HA=$(fch "$FC_O" "$FC_D")
+t_eq "DR-streak: setup: the owner confirmed the focus model-free" "$out" "NEEDS_REFRESH focus confirmed"
+t_eq "DR-streak: ... a fresh drift record belongs to the accepted identity" "$(drdrift)" '{"acknowledged": null, "hash": "'$HA'", "heads": null, "revise_requested": false, "streak": 0}'
+drcommit c1; SHA=$(drsha); begin
+t_eq "DR-streak: the pack shows the staged drift record" "$(get "$STAGE/pack.json" 'd["drift"]')" "{'streak': 0, 'new_work': True, 'acknowledged': [], 'revise_requested': False, 'open': False}"
+rej "DR-streak: the FIRST departure is not eligible for a decision" "$(drraise "commit:$SHA")" "it needs a second departure on distinct new work"
+rej "DR-streak: a drift decision needs a departure" "J[\"fit\"]={\"verdict\":\"consistent\"}; J[\"decisions\"].append($DRDEC)" "fit.verdict is not departure"
+pub "$(drdep "commit:$SHA")" update; t_pre "DR-streak: the first departure counts (against the accepted focus)" "$eo" "PM_EMBED_OK"
+t_eq "DR-streak: ... streak 1 with the heads it saw; fit.against says accepted" "$(S '(d["intent"]["drift"]["streak"], d["intent"]["drift"]["heads"] == d["judged_key"]["heads"], d["fit"]["against"])')" "(1, True, 'accepted')"
+bump; begin
+t_eq "DR-streak: no new commits: the pack says there is no new work" "$(get "$STAGE/pack.json" '(d["drift"]["streak"], d["drift"]["new_work"])')" "(1, False)"
+rej "DR-streak: ... so even a streak of 1 is not enough" "$(drraise "file:PLAN.md")" "it needs a second departure on distinct new work"
+pub "$(drdep "file:PLAN.md")" update
+t_eq "DR-streak: the same heads twice do not count again" "$(S '(d["intent"]["drift"]["streak"])')" "1"
+drcommit c2; bump; begin; FPP=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$R/PLAN.md")
+t_eq "DR-streak: new commits, streak 1: the pack shows an eligible state" "$(get "$STAGE/pack.json" '(d["drift"]["streak"], d["drift"]["new_work"], d["drift"]["open"])')" "(1, True, False)"
+rej "DR-streak: options are exactly A / B / C" "$(drraise "file:PLAN.md"); J[\"decisions\"][-1][\"options\"]=J[\"decisions\"][-1][\"options\"][:2]" "a drift decision's options are exactly A Keep the focus"
+rej "DR-streak: default is hold" "$(drraise "file:PLAN.md"); J[\"decisions\"][-1][\"default\"]=\"A\"" "a drift decision's default is hold"
+rej "DR-streak: about has one value" "$(drraise "file:PLAN.md"); J[\"decisions\"][-1][\"about\"]=\"scope\"" 'about must be "drift" (the only value)'
+rej "DR-streak: the closure predicate is the script's" "$(drraise "file:PLAN.md"); J[\"decisions\"][-1][\"resolves_when\"]=[{\"kind\":\"intent_changed\",\"hash\":\"$HA\"}]" "the closure predicate of a drift decision is bound by the script when it is raised"
+rej "DR-streak: intent_hash and observations are the script's" "$(drraise "file:PLAN.md"); J[\"decisions\"][-1][\"intent_hash\"]=\"$HA\"" "intent_hash is owned by the script and must not be supplied"
+rej "DR-streak: a model-written intent_changed predicate is refused like tid (on any new decision)" 'J["decisions"].append({"id":"D-020","q":"Is it done?","options":[{"id":"A","label":"yes"},{"id":"B","label":"no"}],"default":"hold","ready":True,"resolves_when":[{"kind":"intent_changed","hash":"abc"}]})' "resolves_when[1] kind intent_changed is bound by the script"
+rej "DR-streak: only one new drift decision per judgement" "$(drraise "file:PLAN.md"); J[\"decisions\"].append(dict($DRDEC, id=\"D-011\"))" "only one new drift decision per judgement"
+pub "$(drraise "file:PLAN.md")" update; t_pre "DR-streak: a second departure on new work raises the decision" "$eo" "PM_EMBED_OK"
+t_eq "DR-streak: ... the script bound about, the identity, the observations and the predicate" "$(S '[{k: x.get(k) for k in ("about","intent_hash","observations","resolves_when","status","default")} for x in d["decisions"] if x["id"]=="D-010"][0]')" "{'about': 'drift', 'intent_hash': '$HA', 'observations': ['file:PLAN.md:$FPP'], 'resolves_when': [{'kind': 'intent_changed', 'hash': '$HA'}], 'status': 'open', 'default': 'hold'}"
+t_eq "DR-streak: ... the departure counted (streak 2); the attention is the decision" "$(S '(d["intent"]["drift"]["streak"], d["since"]["attention"]["kind"], d["since"]["attention"]["id"])')" "(2, 'decision', 'D-010')"
+if [ "$HAVE_NODE" = 1 ]; then rbpage; t_has "DR-page: the fit line names the confirmed focus" "$(pj 'd["fit"][0][1]')" "fit: departure from the confirmed focus"; fi
+drcommit c3; bump; begin
+t_eq "DR-carry: the pack shows the open drift decision (about kept, the script's fields kept out of the model's view)" "$(get "$STAGE/pack.json" '[{k: x.get(k) for k in ("about","intent_hash","observations","resolved")} for x in d["decisions"] if x["id"]=="D-010"][0]')|$(get "$STAGE/pack.json" 'd["drift"]["open"]')" "{'about': 'drift', 'intent_hash': None, 'observations': None, 'resolved': False}|True"
+rej "DR-carry: a second open drift decision is refused" "$(drdep "file:PLAN.md"); J[\"decisions\"].append($DRDEC); J[\"decisions\"].append(dict($DRDEC, id=\"D-011\"))" "a drift decision is already open"
+rej "DR-carry: dropping about from a carried decision is refused" "J[\"decisions\"].append(dict($DRDEC)); del J[\"decisions\"][-1][\"about\"]" "about is fixed when the decision is raised; repeat it unchanged"
+rej "DR-carry: changing its predicate is refused" "J[\"decisions\"].append(dict($DRDEC, resolves_when=[{\"kind\":\"intent_changed\",\"hash\":\"zzz\"}]))" "resolves_when is fixed when the decision is raised"
+rej "DR-carry: it cannot be closed while the focus is unchanged" "J[\"decisions\"].append(dict($DRDEC, overtaken={\"why\":\"no\"}))" "overtaken, but resolves_when does not hold yet (the confirmed focus is replaced by another)"
+pub "J[\"fit\"]={\"verdict\":\"consistent\"}; J[\"decisions\"].append($DRDEC)" update
+t_pre "DR-carry: after fit turned consistent the decision is carried unchanged (the gate is for new ids)" "$eo" "PM_EMBED_OK"
+t_eq "DR-carry: ... still open, with the script's fields; consistent reset the streak" "$(S '([x["status"] for x in d["decisions"] if x["id"]=="D-010"], [x["intent_hash"] for x in d["decisions"] if x["id"]=="D-010"], d["intent"]["drift"]["streak"], d["fit"]["verdict"])')" "(['open'], ['$HA'], 0, 'consistent')"
+fcset "Other outcome" "Other done"; out=$(facts); HB=$(fch "Other outcome" "Other done")
+t_pre "DR-carry: an F-set with new words: the intention changed" "$out" "NEEDS_JUDGEMENT focus set by owner"; INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "DR-carry: ... the staged drift record is reset to the new identity (Q6); the pack shows the decision resolved" "$(get "$STAGE/snapshot.json" 'd["intent"]["drift"]["hash"] == "'$HB'" and d["intent"]["drift"]["streak"] == 0'):$(get "$STAGE/pack.json" '[x["resolved"] for x in d["decisions"] if x["id"]=="D-010"]')" "True:[True]"
+rej "DR-streak: after the reset the first departure is not eligible (and the open decision is still there)" "$(drdep "file:PLAN.md"); J[\"decisions\"].append(dict($DRDEC, id=\"D-011\"))" "a drift decision is not allowed here"
+pub "J[\"decisions\"].append(dict($DRDEC, overtaken={\"why\":\"The owner set a new focus\"}))" update
+t_pre "DR-carry: the owner's new focus closes the question by events" "$eo" "PM_EMBED_OK"
+t_eq "DR-carry: ... overtaken, evidence focus:changed; the drift record belongs to the new identity" "$(S '([(x["status"], x["overtaken_ref"]) for x in d["decisions"] if x["id"]=="D-010"], d["intent"]["drift"]["hash"] == "'$HB'", d["intent"]["drift"]["streak"])')" "([('overtaken', 'focus:changed')], True, 0)"
+
+# ---- DR-exclusion: an owner exclusion named by the model makes a drift decision eligible at once
+drproj dre || true
+fcset "$FC_O" "$FC_D" '["no deploy"]'; begin; pub '' update
+t_eq "DR-exclusion: setup: the focus carries an exclusion" "$(S 'd["intent"]["accepted"]["exclusions"]')" "['no deploy']"
+drcommit e1; SHA=$(drsha); begin
+rej "DR-exclusion: an index beyond the owner's exclusions" "$(drdep "commit:$SHA" 1)" "fit.exclusion 1 is not an index into the owner's exclusions (1)"
+pub "$(drraise "commit:$SHA" 0)" update; t_pre "DR-exclusion: a departure naming exclusion 0 raises the decision at streak 0" "$eo" "PM_EMBED_OK"
+t_eq "DR-exclusion: ... state.fit carries the index" "$(S '(d["fit"]["exclusion"], [x["status"] for x in d["decisions"] if x["id"]=="D-010"])')" "(0, ['open'])"
+
+# L1 (Codex r4): the prompt's novelty rule ("the same commit or path counts as acknowledged, however spelled") applied to
+# pack.drift.acknowledged must agree with the identity gate for every spelling fit validation accepts
+ackrule() { python3 -I - "$HOOKS" "$STAGE" "$@" <<'PY'
+import sys, json, os
+sys.path.insert(0, sys.argv[1])
+import pm_validate as VAL
+snap = json.load(open(os.path.join(sys.argv[2], "snapshot.json")))
+pack = json.load(open(os.path.join(sys.argv[2], "pack.json")))
+acks = pack["drift"]["acknowledged"]
+gate = set(snap["intent"]["drift"]["acknowledged"]["observations"])
+def rule(ref):
+    if ref.startswith("commit:"):
+        sha = ref[7:]
+        return any(a.startswith("commit:") and (a[7:].startswith(sha) or sha.startswith(a[7:])) for a in acks)
+    rest = ref[5:]
+    head, _, tail = rest.rpartition(":")
+    if head and tail.isdigit():
+        rest = head
+    return any(a.startswith("file:") and os.path.normpath(a[5:]) == os.path.normpath(rest) for a in acks)
+out = []
+for ref in sys.argv[3:]:
+    ident, prob = VAL.resolve_observation(ref, snap, pack)
+    out.append([prob is None, rule(ref), ident in gate])
+print(json.dumps(out))
+PY
+}
+# ---- DR-ack: the owner's answers act on the drift record under the intent_hash guard; re-alert only on NEW material evidence
+t_eq "DR-ack: reducer unit: A acknowledges the observations and resets the streak; B asks for a revision; C and hold change nothing" "$(python3 -I - "$HOOKS" <<'PY'
+import sys, json, copy
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_common as C, pm_collect as K
+def rec(h): return {"outcome": "o", "done_when": "d", "exclusions": [], "hash": h, "at": None, "line": 1}
+def dec(ih="A"): return {"id": "D-010", "status": "open", "about": "drift", "intent_hash": ih, "observations": ["o1"], "options": [{"id": "A"}, {"id": "B"}, {"id": "C"}]}
+def ans(a, line=1): return {"id": "D-010", "answer": a, "at": None, "by": "owner", "note": None, "line": line}
+def fset(o, line=1): return dict(id="F-set", answer=o, note="d", at=None, by="owner", exclusions=[], line=line)
+def run(pending, ih="A", streak=3, rev=False):
+    d = C.new_drift("A"); d["streak"] = streak; d["revise_requested"] = rev
+    it = {"accepted": rec("A"), "proposed": None, "target": None, "drift": d}
+    K.apply_answers({"D-010": dec(ih)}, pending, it)
+    return it["drift"]
+out = []
+d = run([ans("A")]); out.append((d["streak"], d["acknowledged"], d["revise_requested"]))
+d = run([ans("B")]); out.append((d["streak"], d["acknowledged"], d["revise_requested"]))
+d = run([ans("C")]); out.append((d["streak"], d["acknowledged"], d["revise_requested"]))
+d = run([ans("hold")]); out.append((d["streak"], d["acknowledged"], d["revise_requested"]))
+d = run([ans("A")], ih="Z"); out.append(("stale decision", d["streak"], d["acknowledged"]))
+NEWH = C.intent_hash("New", "d", [])
+d = run([fset("New", 1), ans("B", 2)]); out.append(("F-set new, old B", d["hash"] == NEWH, d["revise_requested"], d["streak"]))
+d = run([ans("B", 1), fset("New", 2)]); out.append(("old B, F-set new", d["hash"] == NEWH, d["revise_requested"], d["streak"]))
+same = dict(fset("x"), answer="o")
+same_h = C.intent_hash("o", "d", [])
+it = {"accepted": dict(rec(same_h)), "proposed": None, "target": None, "drift": dict(C.new_drift(same_h), revise_requested=True, streak=2)}
+K.apply_answers({}, [dict(same, line=1)], it); out.append(("same F-set", it["drift"]["revise_requested"], it["drift"]["streak"], it["drift"]["hash"] == same_h))
+print(json.dumps(out))
+PY
+)" '[[0, {"observations": ["o1"]}, false], [3, null, true], [3, null, false], [3, null, false], ["stale decision", 3, null], ["F-set new, old B", true, false, 0], ["old B, F-set new", true, false, 0], ["same F-set", false, 2, true]]'
+drproj dra || true
+fcset "$FC_O" "$FC_D" '["no deploy"]'; begin; pub '' update
+echo "new" > "$R/ev/new.md"; drcommit a1; begin
+FPN=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$R/ev/new.md")
+pub "$(drraise "file:ev/new.md" 0)" update; t_pre "DR-ack: setup: the decision is raised on file evidence (exclusion 0)" "$eo" "PM_EMBED_OK"
+t_eq "DR-ack: ... its observations are the file's identity" "$(S '[x["observations"] for x in d["decisions"] if x["id"]=="D-010"][0]')" "['file:ev/new.md:$FPN']"
+printf '{"id":"D-010","answer":"A","at":"2026-10-11T10:00:00+03:00","by":"owner"}\n' >> "$PM/answers.jsonl"; begin
+t_eq "DR-ack: the owner answered A: the staged drift record acknowledges exactly those observations" "$(get "$STAGE/snapshot.json" '(d["intent"]["drift"]["acknowledged"], d["intent"]["drift"]["streak"], [x["status"] for x in d["decisions"] if x["id"]=="D-010"])')" "({'observations': ['file:ev/new.md:$FPN']}, 0, ['answered'])"
+t_eq "DR-ack (K1): the pack the model receives names the acknowledged ref in the string form it lists it (the file is unchanged); the commit-based new_work is not that signal" "$(get "$STAGE/pack.json" '(d["drift"]["acknowledged"], d["drift"]["new_work"], "ev/new.md" in d["dirty_paths"])')" "(['file:ev/new.md'], False, True)"
+rej "DR-ack: the same observations do not re-raise it (even with an exclusion)" "$(drraise2 "file:ev/new.md" 0)" "the owner already acknowledged these observations"
+rej "DR-ack: ... a re-spelled ref (with a line number) is the same identity" "$(drraise2 "file:ev/new.md:1" 0)" "the owner already acknowledged these observations"
+rej "DR-ack (L1): ... a normalised path spelling (./) is the same identity" "$(drraise2 "file:./ev/new.md" 0)" "the owner already acknowledged these observations"
+t_eq "DR-ack (L1): every accepted spelling of the acknowledged file (bare, with a line number, with ./) is acknowledged by the prompt rule AND by the identity gate" "$(ackrule "file:ev/new.md" "file:ev/new.md:1" "file:./ev/new.md")" "[[true, true, true], [true, true, true], [true, true, true]]"
+t_true "DR-ack (L1): the agent prompt states the rule: evidence spelled as the pack lists it, and the same commit or path counts as acknowledged however spelled" "grep -q 'spelled exactly as the pack lists them (no line number, no \`./\`)' '$TD/../agents/project-map.md' && grep -q 'the same commit or path counts as acknowledged, however spelled' '$TD/../agents/project-map.md'"
+echo "more" >> "$R/ev/new.md"; begin
+FPN2=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$R/ev/new.md")
+t_eq "DR-ack (K1): the same file changed again with NO new commits: new_work is false, yet it is NOT in pack.drift.acknowledged (a changed file is new evidence)" "$(get "$STAGE/pack.json" '(d["drift"]["acknowledged"], d["drift"]["new_work"], d["since"]["commits"])')" "([], False, 0)"
+pub "$(drraise2 "file:ev/new.md" 0)" update
+t_pre "DR-ack: a changed file at the same path is new material evidence: re-raised" "$eo" "PM_EMBED_OK"
+t_eq "DR-ack: ... under a new id, with the new identity" "$(S '[(x["id"], x["observations"]) for x in d["decisions"] if x.get("about") == "drift" and x["status"] == "open"]')" "[('D-011', ['file:ev/new.md:$FPN2'])]"
+printf '{"id":"D-011","answer":"B","at":"2026-10-11T10:00:00+03:00","by":"owner"}\n' >> "$PM/answers.jsonl"; begin; pub '' update
+t_eq "DR-ack: B: a revision is requested (published), the brief says what to do" "$(S 'd["intent"]["drift"]["revise_requested"]')|$(grep '^focus:' "$PM/brief.txt")" "True|focus: revision requested: say the new one"
+if [ "$HAVE_NODE" = 1 ]; then rbpage; t_has "DR-ack: ... the page says so under the focus" "$(pj 'd["since"]')" "revision requested: say the new focus"; fi
+fcset "Other outcome" "Other done"; begin
+t_eq "DR-ack: the next F-set clears the request and starts a new record (staged)" "$(get "$STAGE/snapshot.json" '(d["intent"]["drift"]["revise_requested"], d["intent"]["drift"]["hash"] == "'$(fch "Other outcome" "Other done")'", d["intent"]["drift"]["acknowledged"])')" "(False, True, None)"
+pub '' update
+t_eq "DR-ack: ... and it is published so: the brief is back to the focus" "$(S 'd["intent"]["drift"]["revise_requested"]')|$(grep '^focus:' "$PM/brief.txt")" "False|focus: Other outcome (confirmed)"
+
+# ---- K1: the pack tells the model which refs are already acknowledged (commits relisted after a branch switch)
+drproj drb || true
+fcset "$FC_O" "$FC_D" '["no deploy"]'; begin; pub '' update
+BASEC=$(cd "$R" && git rev-parse HEAD)
+drcommit b1; SC=$(drsha); begin
+pub "$(drraise "commit:$SC" 0)" update; t_pre "DR-ack (K1): setup: the question is raised on commit C" "$eo" "PM_EMBED_OK"
+printf '{"id":"D-010","answer":"A","at":"2026-10-11T10:00:00+03:00","by":"owner"}\n' >> "$PM/answers.jsonl"
+(cd "$R" && git checkout -q -b sib "$BASEC" && echo s > sib.txt && git add sib.txt && git commit -qm sib); begin; pub '' update
+t_pre "DR-ack (K1): setup: a judgement on a sibling branch consumes the answer" "$eo" "PM_EMBED_OK"
+(cd "$R" && git checkout -q main); drcommit b2; SD=$(drsha); begin
+t_eq "DR-ack (K1): back on C's branch with a later unrelated commit D: C is listed AGAIN (history rewritten) and new_work is true, but the pack names C as acknowledged and not D" "$(get "$STAGE/pack.json" '(sorted(i["h"] for dd in d["commits"]["days"] for i in dd["items"] if i["h"] in ("'$SC'", "'$SD'")) == sorted(["'$SC'", "'$SD'"]), d["drift"]["acknowledged"], d["drift"]["new_work"], d["drift"]["streak"])')" "(True, ['commit:$SC'], True, 0)"
+t_eq "DR-ack (L1): the commits: C by its listed short sha and by its full oid is acknowledged by the prompt rule AND by the gate; D is new to both" "$(ackrule "commit:$SC" "commit:$(cd "$R" && git rev-parse "$SC")" "commit:$SD")" "[[true, true, true], [true, true, true], [true, false, false]]"
+rej "DR-ack (K1): citing only the acknowledged commit is refused although new_work is true" "J[\"fit\"]={\"verdict\":\"departure\",\"concern\":\"x\",\"evidence\":[\"commit:$SC\"],\"exclusion\":0}; J[\"decisions\"].append(dict($DRDEC, id=\"D-011\"))" "the owner already acknowledged these observations"
+pub "J[\"fit\"]={\"verdict\":\"departure\",\"concern\":\"x\",\"evidence\":[\"commit:$SC\",\"commit:$SD\"],\"exclusion\":0}; J[\"decisions\"].append(dict($DRDEC, id=\"D-011\"))" update
+t_pre "DR-ack (K1): ... citing the new commit D as well is accepted" "$eo" "PM_EMBED_OK"
+t_eq "DR-ack (K1): acknowledged_refs unit: the string form of the pack, commits first, at most 6, a changed or unverified file is not listed" "$(python3 -I - "$HOOKS" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_validate as V
+oids = ["%07x" % (i + 1) + "0" * 33 for i in range(10)]
+hs = [o[:7] for o in oids]
+snap = {"commit_oids": {".|%s" % h: o for h, o in zip(hs, oids)}, "watch": [{"path": "w.md", "kind": "file"}], "prev_key": {"watch_hashes": {"w.md": "aaa"}}, "key": {"watch_hashes": {"w.md": "bbb"}},
+        "file_fp": {"a.md": {"fp": "111111111111", "status": "verified"}, "b.md": {"fp": "222222222222", "status": "verified"}, "c.md": {"status": "unknown"}, "w.md": {"fp": "333333333333", "status": "verified"}},
+        "intent": {"drift": {"acknowledged": {"observations": ["commit:.:" + o for o in oids] + ["file:a.md:111111111111", "file:b.md:OLDOLDOLDOLD", "file:c.md:111111111111", "file:w.md:333333333333"]}}}}
+pack = {"commits": {"days": [{"items": [{"r": ".", "h": h} for h in hs]}]}, "dirty_paths": ["a.md", "b.md", "c.md", "other.md"], "watch": [{"path": "w.md"}]}
+many = V.acknowledged_refs(snap, pack)
+snap2 = json.loads(json.dumps(snap)); snap2["intent"]["drift"]["acknowledged"]["observations"] = ["file:a.md:111111111111", "file:b.md:OLDOLDOLDOLD", "file:c.md:111111111111", "file:w.md:333333333333"]
+few = V.acknowledged_refs(snap2, pack)
+pack3 = {"commits": {"days": [{"items": [{"r": ".", "h": hs[0]}]}]}, "dirty_paths": [], "watch": []}
+snap3 = json.loads(json.dumps(snap)); snap3["intent"]["drift"]["acknowledged"] = None
+print(json.dumps([len(many), many[:2] == ["commit:" + hs[0], "commit:" + hs[1]], few, V.acknowledged_refs(snap, pack3), V.acknowledged_refs(snap3, pack), V.acknowledged_refs(snap, None)]))
+PY
+)" '[6, true, ["file:a.md", "file:w.md"], ["commit:0000001"], [], []]'
+t_eq "DR-ack (K1): the list is part of every size measurement: six long refs force a trim the pack would not otherwise make, and the pack stays inside 8192" "$(python3 -I - "$HOOKS" "$STAGE" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K, pm_validate as V
+snap = json.load(open(sys.argv[2] + "/snapshot.json"))
+snap["intent"]["drift"]["acknowledged"] = {"observations": ["commit:.:x"]}
+def pack(L):
+    s2 = json.loads(json.dumps(snap)); s2["dirty_paths"] = ["d/" + "x" * L + "%02d" % i for i in range(20)]
+    return K.build_pack(s2, "inv-x")
+L = next(L for L in range(10, 400, 5) if len(json.dumps(pack(L))) >= 7300)
+base = pack(L)
+real = V.acknowledged_refs
+V.acknowledged_refs = lambda sn, p, limit=6: ["file:" + "y" * 300] * 6
+big = pack(L)
+V.acknowledged_refs = real
+print(json.dumps([len(json.dumps(base)) <= 8192, len(base["dirty_paths"]), len(json.dumps(big)) <= 8192, len(big["dirty_paths"]) < len(base["dirty_paths"]), len(big["drift"]["acknowledged"])]))
+PY
+)" '[true, 20, true, true, 6]'
+
+# the three channels that reduce owner lines (collection, late answers, --accept-answers): an old answer never marks a new intention
+drproj drch || true
+fcset "$FC_O" "$FC_D" '["no deploy"]'; begin; pub '' update
+drcommit h1; SHA=$(drsha); begin; pub "$(drraise "commit:$SHA" 0)" update; t_pre "DR-ack: setup: an open drift decision about the first intention" "$eo" "PM_EMBED_OK"
+HB=$(fch "Other outcome" "Other done" '[]')
+Bl='{"id":"D-010","answer":"B","at":"2026-10-11T10:00:00+03:00","by":"owner"}'
+Fl='{"id":"F-set","answer":"Other outcome","note":"Other done","at":"2026-10-11T10:00:00+03:00","by":"owner"}'
+L1=$(head -n 1 "$PM/answers.jsonl")
+drlines() { printf '%s\n' "$L1" > "$PM/answers.jsonl"; local l; for l in "$@"; do printf '%s\n' "$l" >> "$PM/answers.jsonl"; done; }   # line 1 (applied) stays: only what follows it changes
+drlines "$Bl"; begin
+t_eq "DR-ack: collection, control: the answer about the CURRENT intention asks for a revision" "$(get "$STAGE/snapshot.json" '(d["intent"]["drift"]["revise_requested"])')" "True"
+drlines "$Fl" "$Bl"; begin
+t_eq "DR-ack: collection: F-set new, then the old B: the new intention is untouched" "$(get "$STAGE/snapshot.json" '(d["intent"]["drift"]["revise_requested"], d["intent"]["drift"]["hash"] == "'$HB'", d["intent"]["accepted"]["hash"] == "'$HB'")')" "(False, True, True)"
+drlines "$Bl" "$Fl"; begin
+t_eq "DR-ack: collection: the old B, then the F-set new: reset by the F-set" "$(get "$STAGE/snapshot.json" '(d["intent"]["drift"]["revise_requested"], d["intent"]["drift"]["hash"] == "'$HB'")')" "(False, True)"
+t_eq "DR-ack: late answers (the reducer unit), both orders: the old B never marks the new intention; the control does" "$(python3 -I - "$HOOKS" "$PM" "$STAGE" "$HB" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+pm, stage, hb = sys.argv[2:5]
+snap = json.load(open(stage + "/snapshot.json"))
+snap["answers"] = dict(snap["answers"], total=0, applied=0, total_hash=K.prefix_hash([], 0))
+B = '{"id":"D-010","answer":"B","at":"2026-10-11T10:00:00+03:00","by":"owner"}'.encode()
+F = '{"id":"F-set","answer":"Other outcome","note":"Other done","at":"2026-10-11T10:00:00+03:00","by":"owner"}'.encode()
+snap["intent"] = {k: v for k, v in snap["intent"].items()}
+snap["intent"]["accepted"] = None
+def late(lines):
+    r = K.late_answers(pm, dict(snap, intent=json.loads(json.dumps(INTENT0))), ["D-010"], image=[(i + 1, l) for i, l in enumerate(lines)])
+    d = r["intent"]["drift"]; return (d["revise_requested"], d["hash"] == hb)
+# the staged intent for late answers is the one BEFORE the lines: take the published first intention
+import os
+prev = K.load_prev(pm)
+INTENT0 = K.intent_of(prev["state"])
+snap["decisions"] = prev["state"]["decisions"]
+print(json.dumps([late([B]), late([F, B]), late([B, F])]))
+PY
+)" '[[true, false], [false, true], [false, true]]'
+drlines "$Fl" "$Bl"; out=$(python3 "$HOOKS/project-map-facts.py" --accept-answers "$R"); begin
+t_eq "DR-ack: --accept-answers replay (F-set new, old B): the new intention is untouched" "$(get "$STAGE/snapshot.json" '(d["intent"]["drift"]["revise_requested"], d["intent"]["drift"]["hash"] == "'$HB'", d["intent"]["accepted"]["hash"] == "'$HB'")')" "(False, True, True)"
+drlines "$Bl" "$Fl"; out=$(python3 "$HOOKS/project-map-facts.py" --accept-answers "$R"); begin
+t_eq "DR-ack: --accept-answers replay (old B, F-set new): reset by the F-set" "$(get "$STAGE/snapshot.json" '(d["intent"]["drift"]["revise_requested"], d["intent"]["drift"]["hash"] == "'$HB'")')" "(False, True)"
+drlines "$Bl"; out=$(python3 "$HOOKS/project-map-facts.py" --accept-answers "$R"); begin
+t_eq "DR-ack: --accept-answers replay, control (only the B about the current intention): it counts" "$(get "$STAGE/snapshot.json" 'd["intent"]["drift"]["revise_requested"]')" "True"
+
+# ---- DR-carry (late): an F-set that arrives while a closure by events is judged resets the drift record; the question closes on the next judgement
+drproj drl "$(ovraise "$RW_TP,$RW_SY")" || true
+fcset "$FC_O" "$FC_D" '["no deploy"]'; begin; pub "$DRE" update
+drcommit l1; begin; pub "$(drraise "commit:$(drsha)" 0); $DRE" update
+HA=$(fch "$FC_O" "$FC_D" '["no deploy"]'); HB=$(fch "Other outcome" "Other done" '[]')
+t_eq "DR-carry (late): setup: an open drift decision about the first intention" "$(S '[(x["status"], x["intent_hash"]) for x in d["decisions"] if x.get("about") == "drift"]')" "[('open', '$HA')]"
+drcommit l2; ovpush drl; bump; begin
+jud "$INVN" update "$(drdep "file:PLAN.md"); $(ovj "J[\"decisions\"].append($DRDEC); $DRE")"
+fcset "Other outcome" "Other done"; printf '{"id":"D-002","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"; rm "$R/ev/c2.md"
+eo=$(embed "$INVN")
+t_has "DR-carry (late): the answer won over the closure by events" "$eo" "PM_EMBED_NOTE owner answer for D-002"
+t_eq "DR-carry (late): the late F-set is the accepted record and RESET the drift record (no streak, no request, no acknowledgement)" "$(S '(d["intent"]["accepted"]["outcome"], d["intent"]["drift"]["hash"] == "'$HB'", d["intent"]["drift"]["streak"], d["intent"]["drift"]["revise_requested"], d["intent"]["drift"]["acknowledged"])')" "('Other outcome', True, 0, False, None)"
+t_eq "DR-carry (late): ... the fit is published as judged (against the focus it was written against)" "$(S '(d["fit"]["verdict"], d["fit"]["against"])')" "('departure', 'accepted')"
+t_eq "DR-carry (late): ... the raised decision stays open and about the first intention; the assurance says the focus changed" "$(S '([(x["status"], x["intent_hash"]) for x in d["decisions"] if x.get("about") == "drift"], [w for w in d["assurance"]["why"] if "focus" in w])')" "([('open', '$HA')], ['focus changed after the assessment'])"
+t_eq "DR-carry (late): the publication recheck is in this path too: the file that vanished meanwhile is unverified, and the map is behind" "$(S '(d["stale"]["why"], [c["id"] for ph in d["phases"] for c in ph["criteria"] if c.get("unverified")])')" "('completion evidence lost: P1.c2', ['P1.c2'])"
+out=$(facts); INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_pre "DR-carry (late): the next run re-judges" "$out" "NEEDS_JUDGEMENT "
+t_eq "DR-carry (late): ... and the pack shows the old question resolved (the focus it was about is gone)" "$(get "$STAGE/pack.json" '[x["resolved"] for x in d["decisions"] if x["id"]=="D-010"]')" "[True]"
+pub "J[\"decisions\"]=[x for x in J[\"decisions\"] if x[\"id\"]!=\"D-002\"]; J[\"decisions\"].append(dict($DRDEC, overtaken={\"why\":\"The owner set a new focus\"})); $DRE" update
+t_pre "DR-carry (late): the next judgement closes the old question" "$eo" "PM_EMBED_OK"
+t_eq "DR-carry (late): ... by events: focus:changed" "$(S '[(x["status"], x["overtaken_ref"]) for x in d["decisions"] if x.get("about") == "drift"]')" "[('overtaken', 'focus:changed')]"
+
+# ---- the other publication paths keep the evidence honest: the prompt hook's mechanical refresh, a deferred closure
+drproj drm2 || true
+rm "$R/ev/c2.md"; (cd "$R" && git add -A && git commit -qm "drop c2")
+eo=$(embed --mechanical --deadline 5); t_pre "DR-refresh: the hook's mechanical refresh (no staging) finds the loss" "$eo" "PM_EMBED_OK"
+t_eq "DR-refresh: ... marks it, says the map is behind, and does NOT rebase the judged key (the loss still has to be judged)" "$(S '([c["id"] for ph in d["phases"] for c in ph["criteria"] if c.get("unverified")], d["stale"]["why"], d["judged_key"]["evidence_lost"], d["evidence"]["lost"][0]["id"])')" "(['P1.c2'], '1 new commits; completion evidence lost: P1.c2', [], 'P1.c2')"
+out=$(facts); t_pre "DR-refresh: ... and facts re-judges" "$out" "NEEDS_JUDGEMENT 1 new commits; completion evidence lost: P1.c2 inv "
+drproj drt "$(ovraise "$RW_TP,$RW_SY")" || true
+ovpush drt; bump; begin
+jud "$INVN" update "$(ovj "$DRE")"; printf '{"id":"D-002","answ' >> "$PM/answers.jsonl"; rm "$R/ev/c1.md"
+eo=$(embed "$INVN")
+t_has "DR-deferred: an uncommitted answer tail defers the closure by events" "$eo" "PM_EMBED_NOTE uncommitted answer tail; events closure of D-002 deferred"
+t_eq "DR-deferred: ... and the evidence recheck of that very publication is in the state" "$(S '([x["status"] for x in d["decisions"] if x["id"]=="D-002"], [c["id"] for ph in d["phases"] for c in ph["criteria"] if c.get("unverified")], d["judged_key"]["evidence_lost"], d["evidence"]["recheck"])')" "(['open'], ['P1.c1'], ['P1.c1'], {'done': 5, 'n': 5})"
+
+# ---- display: brief lines 5b / 6b / 11b, handoff 9b, drop orders
+t_eq "DR-brief: the lines appear in the display order and go in the drop order: 12, 10, 8 (last first), 7, 6b, 5b, 5, 9, 11b, 11" "$(python3 -I - "$HOOKS" "$TD/../docs/demo-state.json" <<'PY'
+import sys, json, copy
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_render as R
+S = json.load(open(sys.argv[2]))
+S["decisions"][0]["status"] = "overtaken"; S["decisions"][0].update(overtaken_why="done by hand", overtaken_ref="tag:v1")
+S["since"] = {"from": {"generation": "g", "assessed_at": "2026-10-01T09:00:00+03:00"}, "commits": 3, "listed": 3, "dirty": 1, "hours": 5,
+              "changes": [{"text": "change one is here", "state": "landed", "ref": "commit:abc1234"}, {"text": "change two is here", "state": "uncommitted", "ref": None},
+                          {"text": "change three is here", "state": "uncommitted", "ref": None}],
+              "attention": {"kind": "drift", "text": "attention text", "why": "attention why"}, "not_checked": []}
+S["intent"] = {"accepted": {"outcome": "Ship it", "done_when": "It ships", "exclusions": [], "hash": "h", "at": "2026-10-01", "line": 1}, "proposed": None, "target": None}
+S["fit"] = {"verdict": "departure", "concern": "fit concern text", "evidence": [], "observations": [], "exclusion": None, "scope": {"shown": 3, "total": 3}, "against": "accepted"}
+S["evidence"] = {"checked": "complete", "n": 3, "done": 3, "unknown": [], "lost": [{"id": "P1.c1", "ref": "file:docs/one.md", "why": "file missing"}, {"id": "P1.c2", "ref": "file:docs/two.md", "why": "file missing"}, {"id": "engine", "ref": "file:docs/three.md:4", "why": "line past end"}]}
+S["stale"] = {"judged_at": "x", "commits_since": 1, "why": "1 new commits"}
+S["coverage"] = {"coverage": "partial", "covered": 1, "total": 2}
+S["repos"][0]["release"] = {"line": "tagged v1 at HEAD"}
+S["usage"] = {"totals": {"all": 123456, "claude": 100000, "codex": 23456}}
+marks = [("tokens ", "12"), ("git: ", "10"), ("- change three", "8c"), ("- change two", "8b"), ("- change one", "8a"), ("since ", "7"), ("focus: ", "6b"), ("fit: ", "5b"),
+         ("attention: ", "5"), ("D-001 overtaken", "9"), ("evidence lost: ", "11b"), ("coverage partial", "11c"), ("stale: ", "11")]
+full = R.brief(S).splitlines()
+present = lambda L: [m for p, m in marks if any(x.startswith(p) for x in L)]
+order, seen = [], set(present(full))
+pos = [m for p, m in marks if any(x.startswith(p) for x in full)]
+disp = [next(i for i, x in enumerate(full) if x.startswith(p)) for p, m in marks if any(x.startswith(p) for x in full)]
+for pad in range(0, 700, 5):
+    T = copy.deepcopy(S); T["headline"]["text"] = "h" * (40 + pad)
+    L = R.brief(T).splitlines()
+    now = set(present(L))
+    for m in [m for p, m in marks if m in seen and m not in now]:
+        order.append(m); seen.discard(m)
+    assert len(R.brief(T).encode()) <= 1000
+    assert L[1].startswith("as of") and L[-1].startswith("generation")
+i5, i5b, i6b = [next(i for i, x in enumerate(full) if x.startswith(p)) for p in ("attention: ", "fit: ", "focus: ")]
+i6 = next(i for i, x in enumerate(full) if x.startswith("next: "))
+print(json.dumps([order, [i5 < i5b < i6 < i6b], len(full)]))
+PY
+)" '[["12", "10", "8c", "8b", "8a", "7", "6b", "5b", "5", "9", "11b", "11c", "11"], [true], 18]'
+t_eq "DR-brief: 6b shows a pending revision request instead of the outcome; 5b only for a departure" "$(python3 -I - "$HOOKS" "$TD/../docs/demo-state.json" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_render as R
+S = json.load(open(sys.argv[2]))
+S["intent"] = {"accepted": {"outcome": "Ship it", "done_when": "It ships", "exclusions": [], "hash": "h", "at": "2026-10-01", "line": 1}, "proposed": None, "target": None,
+               "drift": {"hash": "h", "streak": 1, "heads": None, "acknowledged": None, "revise_requested": True}}
+S["fit"] = {"verdict": "consistent", "concern": None, "evidence": [], "observations": [], "exclusion": None, "scope": {"shown": 1, "total": 1}, "against": "accepted"}
+L = R.brief(S).splitlines()
+print(json.dumps([[x for x in L if x.startswith("focus:")], [x for x in L if x.startswith("fit:")]]))
+PY
+)" '[["focus: revision requested: say the new one"], []]'
+t_eq "DR-handoff: 9b follows 'Next' and goes after the since lines and before 'Where it stands' (12, 11 second first, 8 last first, 7, 9b, 6, 10, 9, 4)" "$(python3 -I - "$HOOKS" "$TD/../docs/demo-state.json" <<'PY'
+import sys, json, copy
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_render as R
+S = json.load(open(sys.argv[2]))
+S["decisions"] = [dict(S["decisions"][0], id="D-%03d" % i, q="question %d" % i, status="open", ready=True) for i in range(1, 3)]
+S["since"] = {"from": {"generation": "g", "assessed_at": "2026-10-01T09:00:00+03:00"}, "commits": 3, "listed": 3, "dirty": 1, "hours": 5,
+              "changes": [{"text": "change %s is here" % w, "state": "landed", "ref": "commit:abc1234"} for w in ("one", "two", "three")],
+              "attention": {"kind": "decision", "id": "D-001", "text": "t", "why": "w"}, "not_checked": []}
+S["intent"] = {"accepted": {"outcome": "Ship the import", "done_when": "The import runs", "exclusions": ["no deploy"], "hash": "h", "at": "2026-10-01", "line": 1}, "proposed": None, "target": None}
+S["fit"] = {"verdict": "departure", "concern": "The new work is not the import", "evidence": [], "observations": [], "exclusion": None, "scope": None, "against": "accepted"}
+S["risks"] = [{"id": "R-1", "text": "first risk", "severity": "high"}, {"id": "R-2", "text": "second risk", "severity": "med"}]
+S["repos"][0]["release"] = {"line": "tagged v1 at HEAD"}
+marks = [("Evidence: ", "12"), ("Open risk: R-2", "11b"), ("Open risk: R-1", "11a"), ("- change three", "8c"), ("- change two", "8b"), ("- change one", "8a"),
+         ("Since ", "7"), ("Fit: ", "9b"), ("Where it stands", "6"), ("Needs the owner", "10"), ("Next: ", "9"), ("Done when", "4")]
+full = R.handoff(S).splitlines()
+present = lambda L: {m for p, m in marks if any(x.startswith(p) for x in L)}
+assert present(full) == {m for _p, m in marks}, present(full)
+idx = {m: next(i for i, x in enumerate(full) if x.startswith(p)) for p, m in marks}
+order, seen = [], present(full)
+for cap in range(len(R.handoff(S).encode()), 100, -1):
+    R.HANDOFF_MAX = cap
+    L = R.handoff(S).splitlines()
+    now = present(L)
+    for m in [m for _p, m in marks if m in seen and m not in now]:
+        order.append(m); seen.discard(m)
+    assert all(x for x in L[:3]) and L[-1].startswith("Context only")
+print(json.dumps([idx["9"] < idx["9b"] < idx["10"], idx["6"] < idx["7"] < idx["9"], order]))
+PY
+)" '[true, true, ["12", "11b", "11a", "8c", "8b", "8a", "7", "9b", "6", "10", "9", "4"]]'
+
+# ---- DR-assurance / DR-fit page: the evidence clauses join the one predicate; the fit line says what the model saw
+ax 'S["evidence"]["checked"]="partial"'; t_eq "DR-assurance: a partial evidence check is a reason" "$(axq '"evidence check incomplete" in d["assurance"]["why"]')" "True"
+ax 'del S["evidence"]'; t_eq "DR-assurance: a state without the evidence view (before 3.6) is not certified either" "$(axq '"evidence check incomplete" in d["assurance"]["why"]')" "True"
+ax 'S["evidence"]["recheck"]={"done":1,"n":3}'; t_eq "DR-assurance: an incomplete publication recheck says how far it got" "$(axq '[w for w in d["assurance"]["why"] if "recheck" in w]')" "['publication recheck 1 of 3']"
+ax 'S["evidence"]["recheck"]={"done":3,"n":3}'; t_eq "DR-assurance: ... a complete one is no reason" "$(axq '[w for w in d["assurance"]["why"] if "recheck" in w]')" "[]"
+ax 'S["phases"][0]["criteria"][0]["unverified"]=True; S["parts"][0]["unverified"]=True'; t_eq "DR-assurance: unverified items are named (the first, then how many more)" "$(axq '[w for w in d["assurance"]["why"] if "unverified" in w]')" "['P1.c1 unverified +1']"
+if [ "$HAVE_NODE" = 1 ]; then
+  rbpage '{"fit":{"verdict":"consistent","concern":null,"evidence":[],"observations":[],"exclusion":null,"scope":{"shown":12,"total":30},"against":"accepted"}}'
+  t_eq "DR-fit: the page says 'consistent with the inspected work (12 of 30 commits shown)'" "$(pj 'd["fit"]')" "[['consistent', 'fit: consistent with the inspected work (12 of 30 commits shown)']]"
+  rbpage '{"fit":{"verdict":"consistent","concern":null,"evidence":[],"observations":[],"exclusion":null,"scope":{"shown":30,"total":30},"against":"accepted"}}'
+  t_eq "DR-fit: ... without the scope when everything was shown" "$(pj 'd["fit"]')" "[['consistent', 'fit: consistent with the inspected work']]"
+  rbpage '{"fit":{"verdict":"departure","concern":"A <script>x</script> concern","evidence":["commit:abc1234"],"observations":[],"exclusion":null,"scope":{"shown":3,"total":9},"against":"accepted"}}'
+  t_eq "DR-fit: a departure names the focus, the concern (as text, never markup) and the scope" "$(pj '(d["fit"], d["scripts"])')" "([['departure', 'fit: departure from the confirmed focus · A <script>x</script> concern (3 of 9 commits shown)']], 0)"
+  rbpage '{"fit":{"verdict":"unknown","concern":null,"evidence":[],"observations":[],"exclusion":null,"scope":{"shown":1,"total":1},"against":"proposed"}}'
+  t_eq "DR-fit: unknown is said as not judged" "$(pj 'd["fit"]')" "[['unknown', 'fit: not judged']]"
+  rbpage '{"evidence":{"checked":"partial","n":60,"done":40,"lost":[],"unknown":[]}}'
+  t_has "DR-page: a partial evidence check says how far it got" "$(pj 'd["progress"]')" "evidence check 40 of 60"
+fi
+
+# ======================================================================================================
+# Codex round 1 on 3.6.0 (I1 .. I5)
+# ======================================================================================================
+# ---- I1 (DR-carry-mark): a judged publication keeps a mark the previous state carries until the ref verified OK
+if [ "$ISROOT" = 0 ]; then
+mkrepo dri1; printf 'ign/\n' >> "$R/.gitignore"; mkdir -p "$R/ign"; echo x > "$R/ign/u1.md"; echo x > "$R/ign/u2.md"; (cd "$R" && git add -A && git commit -qm "ign setup"); begin
+pub 'P["phases"][0]["criteria"]=[{"id":"P1.c1","text":"One","done":True,"ref":"file:ign/u1.md"},{"id":"P1.c2","text":"Two","done":True,"ref":"file:ign/u2.md"}]' full
+t_pre "DR-carry-mark: setup" "$eo" "PM_EMBED_OK"
+rm "$R/ign/u1.md"; out=$(embed --mechanical --deadline 8)
+t_eq "DR-carry-mark: setup: the refresh found the loss and marked the criterion" "$(S '[c for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c1"][0].get("unverified")')" "True"
+chmod 000 "$R/ign"; drcommit k1; begin
+t_eq "DR-carry-mark: the world changed: the latest status is UNKNOWN (nothing lost, nothing ok) when the next assessment is staged" "$(get "$STAGE/snapshot.json" '(d["evidence"]["lost"], d["evidence"]["unknown"], [e["id"] for e in d["evidence"]["ok"]])')" "([], ['P1.c1', 'P1.c2'], ['engine', 'ground-truth'])"
+pub '' update; t_pre "DR-carry-mark: an unrelated key movement; the unchanged criterion is legal (not a listed repair)" "$eo" "PM_EMBED_OK"
+t_eq "DR-carry-mark: ... the judged publication keeps the mark (done untouched), says nothing is lost, and the assurance still names it" "$(S '([c.get("unverified") for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c1"], [c["done"] for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c1"], d["evidence"]["lost"], [w for w in d["assurance"]["why"] if "unverified" in w])')" "([True], [True], [], ['P1.c1 unverified'])"
+chmod 755 "$R/ign"
+# an UNVISITED ref: 56 criteria, the last ones are not reached by the first pass of a fresh record
+mkrepo dri2; printf 'ign/\n' >> "$R/.gitignore"; mkdir -p "$R/ign"; for i in $(seq -w 1 56); do echo x > "$R/ign/r$i.md"; done; (cd "$R" && git add -A && git commit -qm "ign setup"); begin
+DRI2='P["phases"]=[{"id":"P%d"%(i+1),"label":"Phase %d"%(i+1),"criteria":[{"id":"P%d.c%d"%(i+1,j+1),"text":"Criterion %d.%d"%(i+1,j+1),"done":True,"ref":"file:ign/r%02d.md"%(i*8+j+1)} for j in range(8)]} for i in range(7)]'
+pub "$DRI2" full; t_pre "DR-carry-mark: setup (56 criteria)" "$eo" "PM_EMBED_OK"
+rm "$R/ign/r56.md"; out=$(embed --mechanical --deadline 8); out=$(embed --mechanical --deadline 8)
+t_eq "DR-carry-mark: setup: two passes reached P7.c8 and marked it" "$(S '[c.get("unverified") for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P7.c8"]')" "[True]"
+python3 - "$PM/cache.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("evidence", None); json.dump(d, open(sys.argv[1], "w"))
+PY
+drcommit k2; begin
+t_eq "DR-carry-mark: with a fresh record the first pass leaves P7.c8 UNVISITED: no loss, not ok" "$(get "$STAGE/snapshot.json" '(d["evidence"]["lost"], d["evidence"]["checked"], d["evidence"]["done"], "P7.c8" in [e["id"] for e in d["evidence"]["ok"]])')" "([], 'partial', 40, False)"
+pub '' update
+t_eq "DR-carry-mark: ... the publication keeps the mark of the unvisited ref" "$(S '([c.get("unverified") for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P7.c8"], [w for w in d["assurance"]["why"] if "unverified" in w])')" "([True], ['P7.c8 unverified'])"
+else echo "SKIP DR-carry-mark (running as root)"; fi
+
+# ---- I2 (DR-final-plan): a FULL run is validated against the FINAL plan (rebuilt plan + criteria_updates)
+drproj drp1 || true
+rm "$R/ev/c2.md"; (cd "$R" && git add -A && git commit -qm "drop c2"); begin; SHA=$(drsha)
+rej "DR-final-plan: a rebuilt plan that keeps the listed loss done, with nothing in criteria_updates, is refused" "$(drcode "$SHA")" "P1.c2 completion evidence is lost" full
+rej "DR-final-plan: ... and so is a criteria_updates entry with the old (missing) ref" "$(drcode "$SHA" 'J["criteria_updates"]=[{"id":"P1.c2","done":True,"ref":"file:ev/c2.md"}]')" "P1.c2" full
+pub "$(drcode "$SHA" 'J["criteria_updates"]=[{"id":"P1.c2","done":True,"ref":"file:ev/c1.md:1"}]')" full
+t_pre "DR-final-plan: criteria_updates may give the listed loss a NEW ref although plan.out.json still shows the old one" "$eo" "PM_EMBED_OK"
+t_eq "DR-final-plan: ... the published criterion carries the new ref and no mark" "$(drcrit P1.c2)" "{'id': 'P1.c2', 'text': 'Engine builds', 'done': True, 'ref': 'file:ev/c1.md:1'}"
+drproj drp2 || true
+rm "$R/ev/c2.md"; (cd "$R" && git add -A && git commit -qm "drop c2"); begin; SHA=$(drsha)
+pub "$(drcode "$SHA" 'J["criteria_updates"]=[{"id":"P1.c2","done":False}]')" full
+t_pre "DR-final-plan: criteria_updates may reopen the listed loss" "$eo" "PM_EMBED_OK"
+t_eq "DR-final-plan: ... reopened, nothing lost" "$(S '([c["done"] for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P1.c2"], d["evidence"]["lost"])')" "([False], [])"
+drproj drp3 || true
+bump; begin; SHA=$(drsha)
+rej "DR-final-plan: a done criterion of the rebuilt plan with a missing ref that is NOT a known loss is still refused" "$(drcode "$SHA" 'P["phases"][0]["criteria"].append({"id":"P1.c4","text":"New","done":True,"ref":"file:ev/gone.md"})')" "criterion P1.c4: file ref ev/gone.md is not an existing regular file" full
+
+# ---- I3 (DR-symlink): the referenced ENTRY must be a regular file; a link is not evidence
+t_eq "DR-symlink: check_ref and ref_problem agree: regular ok; internal, dangling and escaping links are not evidence" "$(python3 -I - "$HOOKS" "$T" <<'PY'
+import sys, os, json, shutil
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K, pm_validate as V
+base = os.path.join(sys.argv[2], "symlink-root"); shutil.rmtree(base, ignore_errors=True)
+root = os.path.join(base, "root"); os.makedirs(root); open(os.path.join(root, "real.md"), "w").write("1\n2\n3\n"); open(os.path.join(base, "outside.md"), "w").write("1\n2\n3\n")
+os.symlink("real.md", os.path.join(root, "link.md")); os.symlink("nowhere.md", os.path.join(root, "dangle.md")); os.symlink("../outside.md", os.path.join(root, "esc.md"))
+os.makedirs(os.path.join(root, "dir")); os.symlink("dir", os.path.join(root, "dirlink"))
+out = []
+for ref in ("file:real.md:2", "file:link.md:2", "file:dangle.md", "file:esc.md", "file:dirlink", "file:dir"):
+    out.append([K.check_ref(root, [], ref)[0], V.ref_problem(root, [], ref) is None])
+print(json.dumps(out))
+PY
+)" '[["ok", true], ["lost", false], ["lost", false], ["lost", false], ["lost", false], ["lost", false]]'
+drproj drk || true
+rm "$R/ev/c1.md"; ln -s c2.md "$R/ev/c1.md"; (cd "$R" && git add -A && git commit -qm "c1 is now a link"); begin
+t_pre "DR-symlink: a completion file replaced by a link to another regular file is a loss" "$out" "NEEDS_JUDGEMENT 1 new commits; completion evidence lost: P1.c1 inv "
+t_eq "DR-symlink: ... why: file missing (the entry is no longer the regular file the ref named)" "$(get "$STAGE/snapshot.json" '[(e["id"], e["why"]) for e in d["evidence"]["lost"]]')" "[('P1.c1', 'file missing')]"
+rej "DR-symlink: and a link cannot be given back as the repair" 'J["criteria_updates"]=[{"id":"P1.c1","done":True,"ref":"file:ev/c1.md:3"}]' "criteria_updates P1.c1: file ref ev/c1.md is not an existing regular file"
+
+# ---- I4 (DR-symlink-fp): a link has no usable fit identity, on either route
+mkrepo drl4; echo base > "$R/target.md"; ln -s target.md "$R/link.md"; (cd "$R" && git add -A && git commit -qm "link"); begin; pub 'J["watch"]=["PLAN.md","link.md"]' full
+echo more >> "$R/target.md"; begin
+t_eq "DR-symlink-fp: a watched link (watch route only): unknown, while a watched regular file has its fingerprint" "$(get "$STAGE/snapshot.json" '(d["file_fp"]["link.md"], d["file_fp"].get("PLAN.md", {}).get("status", "unwatched-and-unmoved"))')" "({'status': 'unknown'}, 'verified')"
+rm "$R/link.md"; ln -s PLAN.md "$R/link.md"; begin
+t_eq "DR-symlink-fp: ... the same link on BOTH routes (watched and dirty): still unknown, one entry" "$(get "$STAGE/snapshot.json" '("link.md" in d["dirty_paths"], d["file_fp"]["link.md"])')" "(True, {'status': 'unknown'})"
+t_eq "DR-symlink-fp: ... and resolve_observation refuses it as evidence" "$(python3 -I - "$HOOKS" "$STAGE" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_validate as V
+snap = json.load(open(sys.argv[2] + "/snapshot.json")); pack = json.load(open(sys.argv[2] + "/pack.json"))
+print(V.resolve_observation("file:link.md", snap, pack)[1][:60])
+PY
+)" "file link.md has no content identity (deleted, unreadable, a"
+
+# ---- I5 (DR-repo-unreadable): an unreadable repository is unknown; only established absence is "repo moved"
+if [ "$ISROOT" = 0 ]; then
+t_eq "DR-repo-unreadable: check_ref: permission denied -> unknown; the known-repository union keeps it in view; removed -> repo moved; a failed or timed-out query -> unknown" "$(python3 -I - "$HOOKS" "$T" <<'PY'
+import sys, os, json, shutil, subprocess
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K
+base = os.path.join(sys.argv[2], "repo-root"); os.system("chmod -R u+rwx '%s' 2>/dev/null" % base); shutil.rmtree(base, ignore_errors=True)
+root = os.path.join(base, "root"); repo = os.path.join(root, "blocked", "repo"); os.makedirs(repo)
+env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1")
+for c in (["git", "init", "-q", "-b", "main"], ["git", "config", "user.email", "t@t"], ["git", "config", "user.name", "t"], ["git", "config", "commit.gpgsign", "false"]):
+    subprocess.run(c, cwd=repo, env=env, check=True)
+open(os.path.join(repo, "f"), "w").write("x\n")
+subprocess.run(["git", "add", "-A"], cwd=repo, env=env, check=True); subprocess.run(["git", "commit", "-qm", "c"], cwd=repo, env=env, check=True)
+sha = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], cwd=repo, env=env, capture_output=True, text=True).stdout.strip()
+rows = [{"path": "blocked/repo", "vcs": "git"}]
+ref = "commit:" + sha
+out = [K.check_ref(root, rows, ref)[0]]                                          # healthy: ok
+os.chmod(os.path.join(root, "blocked"), 0)
+out.append(K.check_ref(root, rows, ref))                                          # EACCES on the way to the repository
+state = {"repos": [{"path": ".", "vcs": "git"}, {"path": "blocked/repo", "vcs": "git"}]}
+out.append([r["path"] for r in K.evidence_repos([{"path": ".", "vcs": "git"}], state)])    # collection dropped it: the pinned state still names it
+out.append([r["path"] for r in K.evidence_repos([{"path": "blocked/repo", "vcs": "none"}], state)])   # seen as a plain folder: still probed
+os.chmod(os.path.join(root, "blocked"), 0o755)
+real = K.G.run
+K.G.run = lambda *a, **k: (124, "")                                               # a timed-out git query
+out.append(K.check_ref(root, rows, ref))
+K.G.run = real
+os.chmod(os.path.join(repo, ".git"), 0)                                           # a repository whose git cannot be read: the query fails (128) and git cannot name its toplevel
+out.append(K.check_ref(root, rows, ref))
+os.chmod(os.path.join(repo, ".git"), 0o755)
+shutil.rmtree(os.path.join(root, "blocked"))                                      # genuinely removed
+out.append(K.check_ref(root, rows, ref))
+print(json.dumps(out))
+PY
+)" '["ok", ["unknown", ""], [".", "blocked/repo"], ["blocked/repo", ".", "blocked/repo"], ["unknown", ""], ["unknown", ""], ["lost", "repo moved"]]'
+# through collection: a known nested repository that can no longer be entered
+mkrepo drn; drfiles; printf 'repo2/\n' >> "$R/.gitignore"; mkdir -p "$R/repo2"; (cd "$R/repo2" && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && echo n > n.txt && git add -A && git commit -qm nested); (cd "$R" && git add -A && git commit -qm "ignore repo2"); begin
+NSHA=$(cd "$R/repo2" && git rev-parse --short=7 HEAD)
+pub "$(drcode "$NSHA")" full
+t_pre "DR-repo-unreadable: setup: a completion commit that lives in the nested repository" "$eo" "PM_EMBED_OK"
+t_eq "DR-repo-unreadable: ... the nested repository is known to the state" "$(S '[(r["path"], r["vcs"]) for r in d["repos"]]')" "[('.', 'git'), ('repo2', 'git')]"
+chmod 000 "$R/repo2"; out=$(facts)
+t_not "DR-repo-unreadable: it cannot be entered any more: the verdict does not call the commit lost" "$out" "completion evidence lost"
+t_eq "DR-repo-unreadable: ... the snapshot has it unknown, nothing lost, no repair queued" "$(get "$PM/inv-${out##* }/snapshot.json" '(d["evidence"]["lost"], "P1.c3" in d["evidence"]["unknown"])' 2>/dev/null || echo none)" "([], True)"
+# J1: the unknown criterion is PUBLISHED by an UPDATE while the repository is still unreadable; the state must keep naming the repository
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+pub "$DRE" update; t_pre "DR-repo-unreadable: an UPDATE is published while the repository stays inaccessible (the unchanged criterion is legal)" "$eo" "PM_EMBED_OK"
+t_eq "DR-repo-unreadable: ... the published state still names the repository as git (kept, marked inaccessible, no release facts); nothing lost" "$(S '([(r["path"], r["vcs"], r.get("inaccessible"), "release" in r) for r in d["repos"]], d["evidence"]["lost"], d["judged_key"]["evidence_lost"], d["evidence"]["unknown"])')" "([('.', 'git', None, True), ('repo2', 'git', True, False)], [], [], ['P1.c3'])"
+out=$(facts)
+t_eq "DR-repo-unreadable: pass 1 after the publication, permissions still denied: the ref stays unknown, no loss, nothing to repair" "${out%% *}:$(S 'd["evidence"]["lost"]'):$(evrec 'd["results"]["P1.c3|commit:'$NSHA'"]["status"]')" "NO_CHANGE:[]:unknown"
+out=$(embed --mechanical --deadline 8)
+t_eq "DR-repo-unreadable: pass 2 (a mechanical refresh): the repository is still in the state, the ref still unknown, still no loss" "$(S '([(r["path"], r["vcs"], r.get("inaccessible")) for r in d["repos"]], d["evidence"]["lost"], d["stale"])'):$(evrec 'd["results"]["P1.c3|commit:'$NSHA'"]["status"]')" "([('.', 'git', None), ('repo2', 'git', True)], [], None):unknown"
+out=$(facts)
+t_eq "DR-repo-unreadable: pass 3 (facts again): still unknown, never lost, never a repair" "${out%% *}:$(S 'd["evidence"]["lost"]'):$(evrec 'd["results"]["P1.c3|commit:'$NSHA'"]["status"]')" "NO_CHANGE:[]:unknown"
+chmod 755 "$R/repo2"; out=$(facts)
+t_eq "DR-repo-unreadable: permissions restored: the next pass verifies the commit (ok)" "$(evrec 'd["results"]["P1.c3|commit:'$NSHA'"]["status"]')" "ok"
+out=$(embed --mechanical --deadline 8)
+t_eq "DR-repo-unreadable: ... and a refresh reads the repository as git again: the kept marker is gone" "$(S '[(r["path"], r["vcs"], r.get("inaccessible")) for r in d["repos"]]')" "[('.', 'git', None), ('repo2', 'git', None)]"
+# control: a repository that is genuinely removed is established absence: lost, repo moved (a loss to repair)
+mkrepo drn2; drfiles; printf 'repo2/\n' >> "$R/.gitignore"; mkdir -p "$R/repo2"; (cd "$R/repo2" && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && echo n > n.txt && git add -A && git commit -qm nested); (cd "$R" && git add -A && git commit -qm "ignore repo2"); begin
+NSHA2=$(cd "$R/repo2" && git rev-parse --short=7 HEAD); pub "$(drcode "$NSHA2")" full
+rm -rf "$R/repo2"; begin
+t_has "DR-repo-unreadable: control: the repository is really gone -> the commit is a loss to repair" "$out" "completion evidence lost: P1.c3"
+t_eq "DR-repo-unreadable: ... why: repo moved" "$(get "$STAGE/snapshot.json" '[(e["id"], e["why"]) for e in d["evidence"]["lost"]]')" "[('P1.c3', 'repo moved')]"
+else echo "SKIP DR-repo-unreadable (running as root)"; fi
+
+fi   # PM_FC_ONLY=1
 
 echo; echo "total $((pass+fail)) pass $pass fail $fail"; [ "$fail" = 0 ]

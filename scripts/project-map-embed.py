@@ -35,7 +35,7 @@ PLAN_OUT_MAX = 65536
 USAGE_RENDER_MARGIN = 0.7   # seconds of the --deadline kept back for rendering and publishing when usage is collected
 
 
-CARRY_KEYS = ("id", "q", "options", "recommended", "default", "hard_rule", "deadline", "ready")   # a decision's model-owned fields
+CARRY_KEYS = ("id", "q", "options", "recommended", "default", "hard_rule", "deadline", "ready", "about")   # a decision's model-owned fields
 
 
 class EmbedError(Exception):
@@ -159,7 +159,7 @@ def cache_merge(pm, cache, moved_from=None, moved_to=None, clear_accept=False):
         cur.pop("ack_attempt_at", None)
     except OSError:
         pass
-    for k in ("watch_cache", "coverage_cursor"):
+    for k in ("watch_cache", "coverage_cursor", "fp_cache"):   # `evidence` is written by its own critical section (K.check_evidence), never here
         if k in cache:
             cur[k] = cache[k]
     aa = cur.get("answers_accept")
@@ -208,6 +208,34 @@ def finish_files(S, snap, plan, judgement, extra, tpl=TEMPLATE):
         raise EmbedError("brief over %d bytes" % R.BRIEF_MAX)
     files["brief.txt"] = br
     return files
+
+
+def seed_evidence(pm, J, snap, final_plan, genstr, recheck):
+    """15.1: the checks the publication itself made are observations made under the publish lock, so they are recorded under the
+    NEW generation in cache.json `evidence` (a pass of their own, one epoch up): every completion ref the validation just resolved
+    (a repaired item with its new ref, every part, a FULL plan's criteria) is `ok` there. Without it the next facts run would find
+    a record that has never seen them and the published state's view would flap back to partial. A ref the recheck found lost or
+    unknown is NOT seeded (that observation was written by the recheck pass and is newer than the validation)."""
+    items = VAL.completion_items(final_plan, J.get("parts"))
+    valid = VAL.validated_now(J, snap, final_plan)
+    for e in (recheck or {}).get("lost") or []:
+        valid.discard((e["id"], e["ref"]))
+    for pair in (recheck or {}).get("unknown") or []:
+        valid.discard(tuple(pair))
+    if not items or not valid:
+        return
+    cpath = os.path.join(pm, "cache.json")
+    cur = C.load_json(cpath, {})
+    cur = cur if isinstance(cur, dict) else {}
+    stored = cur.get("evidence") if K.evidence_record_ok(cur.get("evidence")) else None
+    epoch = (stored["epoch"] if stored else 0) + 1
+    mine = {"set": K.evidence_set(items), "gen": genstr, "epoch": epoch,
+            "results": {C.evidence_key(i, r): {"status": "ok", "why": "", "at": C.iso(), "epoch": epoch} for i, r in valid}}
+    cur["evidence"] = K.evidence_merge(stored, mine, {C.evidence_key(i, r) for i, r in items})
+    try:
+        C.atomic_write(cpath, C.dumps(cur))
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- normal mode
@@ -306,14 +334,49 @@ def light_stale(root, snap, judged_at, clock=None):
     return {"judged_at": judged_at, "commits_since": n, "why": " and ".join(why)} if why else None
 
 
-def staged_seen(stage, inv_name):
+def staged_pack(stage, inv_name):
+    """The pack the model READ (STAGE/pack.json), not the one finish_files rebuilds for the generation; None when the file is
+    missing or belongs to another invocation. Fit evidence (15.2) may only be an observation THIS pack supplied."""
+    pk = C.load_json(os.path.join(stage, "pack.json"))
+    return pk if isinstance(pk, dict) and pk.get("generation") == inv_name else None
+
+
+def staged_seen(stage, inv_name, pk=None):
     """13.3: the `seen` record of the pack the model READ (STAGE/pack.json), not of the pack finish_files rebuilds for the
     generation. None when the file is missing, belongs to another invocation or carries no well-formed `seen` (a pack from
     before 3.4): the assurance then says "pack coverage unknown"."""
-    pk = C.load_json(os.path.join(stage, "pack.json"))
-    if isinstance(pk, dict) and pk.get("generation") == inv_name and K.valid_seen(pk.get("seen")):
+    pk = pk if pk is not None else staged_pack(stage, inv_name)
+    if isinstance(pk, dict) and K.valid_seen(pk.get("seen")):
         return dict(pk["seen"])
     return None
+
+
+def evidence_recheck(root, snap, final_plan, J, prevp, cache, cur, clock):
+    """15.1 publication recheck: the completion refs the STAGED snapshot verified ok and the judgement still carries are checked once
+    more now (at most K.EVID_CAP, inside the publish lock this embed holds, within the deadline), because the world can change while the
+    judgement is written. -> {done, n, lost[{id, ref, why}], unknown[(id, ref)]}, or None when there was nothing to recheck. `done` =
+    refs whose recheck gave a definite answer (ok or lost); an unknown or unreached ref is not done and the assurance says so
+    ("publication recheck k of n"). The result goes into the published state (build_evidence), never only into a note.
+    Test hook PM_EMBED_EVIDENCE_DEADLINE: seconds for this check (default 20)."""
+    final = set(VAL.completion_items(final_plan, J.get("parts")))
+    ok_pairs = [(e["id"], e["ref"]) for e in (snap.get("evidence") or {}).get("ok") or [] if (e["id"], e["ref"]) in final]
+    if not ok_pairs:
+        return None
+    out = {"done": 0, "n": len(ok_pairs), "lost": [], "unknown": []}
+    items = K.evidence_items(prevp["state"]) if prevp["kind"] == "v4" else []
+    by_key = {C.evidence_key(i, r): (i, r) for i, r in ok_pairs}
+    dl = time.monotonic() + float(os.environ.get("PM_EMBED_EVIDENCE_DEADLINE") or min(20.0, clock.remaining()))
+    _view, ran = K.check_evidence(root, K.evidence_repos(snap.get("repos", []), prevp["state"] if prevp["kind"] == "v4" else None), items, cache,
+                                  dl, cur, only=ok_pairs, held=True)
+    for k, r in ran.items():
+        i, ref = by_key[k]
+        if r["status"] == "unknown":
+            out["unknown"].append((i, ref))
+        else:
+            out["done"] += 1
+            if r["status"] == "lost":
+                out["lost"].append({"id": i, "ref": ref, "why": r["why"]})
+    return out
 
 
 def _read(path, maxb=None):
@@ -344,7 +407,8 @@ def embed_normal(root, inv_name, clock):
         snap = C.load_json(os.path.join(stage, "snapshot.json"))
         if not isinstance(snap, dict) or snap.get("generation") != inv_name:
             raise EmbedError("snapshot.json is missing or does not belong to %s" % inv_name)
-        judged_seen = staged_seen(stage, inv_name)
+        pack = staged_pack(stage, inv_name)
+        judged_seen = staged_seen(stage, inv_name, pack)
         plan_in = C.load_json(os.path.join(stage, "plan.json"))
         jin = C.load_json(os.path.join(stage, "judgement.in.json"), {})
         raw = _read(os.path.join(stage, "judgement.out.json"))
@@ -366,7 +430,8 @@ def embed_normal(root, inv_name, clock):
                 plan = C.loads(po_raw)
             except ValueError as ex:
                 raise EmbedError("plan.out.json is not valid JSON: %s" % str(ex)[:80])
-            VAL.validate_plan(v, plan, root, snap.get("repos", []), True)
+            # structure only here: the completion refs of a FULL plan are checked on the FINAL plan (after criteria_updates), below
+            VAL.validate_plan(v, plan, root, snap.get("repos", []), False)
             if isinstance(plan, dict) and plan.get("generation") != inv_name:
                 v.e("plan.out.json generation does not match this invocation")
         else:
@@ -386,7 +451,7 @@ def embed_normal(root, inv_name, clock):
             pseudo = {"retired_ids": prevp["retired"], "decisions": prevp["decisions"],
                       "parts": [p for p in ls.get("parts", []) if isinstance(p, dict) and isinstance(p.get("id"), str)],
                       "history": []}
-        ctx = {"root": root, "snap": snap, "plan": plan, "prev": pseudo, "full": full, "inv_name": inv_name}
+        ctx = {"root": root, "snap": snap, "plan": plan, "prev": pseudo, "full": full, "inv_name": inv_name, "pack": pack}
         errs = VAL.validate_judgement(J, len(raw), ctx)
         if errs:
             raise EmbedError(errs)
@@ -411,6 +476,11 @@ def embed_normal(root, inv_name, clock):
             else:
                 J["repos"] = [r["path"] for r in snap.get("repos", []) if r["path"] != "."][:12]
         final_plan = VAL.apply_updates(plan, J.get("criteria_updates", []))
+        if full:   # 15.1: a listed loss may be reopened or re-referenced by criteria_updates; the exact unlisted losses may be carried as they were
+            v2 = VAL.V()
+            VAL.check_plan_refs(v2, final_plan, root, snap.get("repos", []), VAL.lost_unlisted(snap.get("evidence")))
+            if v2.errs:
+                raise EmbedError(v2.errs)
         clock.check()
         legacy = {}
         if inv["base"] is None and os.path.isfile(os.path.join(pm, "state.json")) and not os.path.islink(os.path.join(pm, "state.json")):
@@ -425,6 +495,11 @@ def embed_normal(root, inv_name, clock):
                     stage_files["invocation/" + os.path.relpath(full_p, stage)] = fh.read()
         n = (prev["run"]["n"] if prev else (prevp["state"].get("run", {}).get("n", 0) if prevp["kind"] == "legacy" and isinstance(prevp["state"].get("run"), dict) and isinstance(prevp["state"]["run"].get("n"), int) else 0)) + 1
         stale = light_stale(root, snap, snap["facts_at"], clock)
+        recheck = evidence_recheck(root, snap, final_plan, J, prevp, K_cache(pm), cur, clock)
+        if recheck and recheck["lost"]:   # a completion ref vanished while the judgement was written: published unverified, behind
+            w = "completion evidence lost: " + ", ".join(sorted({e["id"] for e in recheck["lost"]})[:3])
+            stale = {"judged_at": snap["facts_at"], "commits_since": (stale or {}).get("commits_since", 0),
+                     "why": " and ".join(x for x in ((stale or {}).get("why"), w) if x)}
         th, eh = K.plugin_hashes()
         # the judged key must describe the lists the judgement now declares: a path the model added is hashed now,
         # a ledger binding that changed gets its new hash; everything else keeps the hashes of the judged world
@@ -481,7 +556,8 @@ def embed_normal(root, inv_name, clock):
         def make(genstr):
             c = {"root": root, "snap": snap2, "J": J, "plan": final_plan, "prev": pseudo, "genstr": genstr, "base": cur,
                  "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale, "judged_seen": judged_seen,
-                 "staged_intent": snap.get("intent")}   # the target is frozen from the STAGED input (14.3), accepted from snap2
+                 "staged_intent": snap.get("intent"),   # the target is frozen from the STAGED input (14.3), accepted from snap2
+                 "fit_res": ctx.get("fit_res"), "recheck": recheck}
             S = VAL.build_state(c)
             if prevp["kind"] != "v4":
                 S["changes"] = []
@@ -493,6 +569,7 @@ def embed_normal(root, inv_name, clock):
 
         genstr = publish(pm, make, bool(legacy), clock)
         S = box["S"]
+        seed_evidence(pm, J, snap2, final_plan, genstr, recheck)
         cache_merge(pm, K_cache(pm))
         return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), stale, notes
     finally:
@@ -520,7 +597,8 @@ def image_seam():
 
 def focus_confirmation(prev, snap, cmp, image):
     """14.3, evaluated INSIDE the refresh, under the publish lock, on its pinned generation (`prev`), its own snapshot and the ONE
-    answers.jsonl image the collection used. -> (accepted record, "") when every condition holds, else (None, reason):
+    answers.jsonl image the collection used. -> (the reduced intent {accepted, ..., drift}, "") when every condition holds, else
+    (None, reason):
     no uncommitted tail; the only key component that moved is answers_count; every complete line after the pinned `applied` is a
     well-formed F-set with the identity of the focus the last assessment served (K.confirmation_only, the predicate facts used).
     The staged prefix is verified by the collection itself (a rewritten file is an error there)."""
@@ -537,8 +615,8 @@ def focus_confirmation(prev, snap, cmp, image):
         return None, "the new lines are not a plain confirmation of the focus"
     pending, _bad = K.parse_pending(lines[prev["applied"]:])
     it = K.intent_base(prev)
-    K.apply_answers({}, pending, it)   # the same reducer as every other owner line
-    return it["accepted"], ""
+    K.apply_answers({}, pending, it)   # the same reducer as every other owner line (3.6: it also keeps the drift record)
+    return K.reconcile_intent(it), ""
 
 
 def embed_mechanical(root, clock, apply_answers=False):
@@ -574,7 +652,8 @@ def embed_mechanical(root, clock, apply_answers=False):
             if apply_answers:
                 image_seam()
             snap = K.collect(root, prev, hd, cache, git_timeout=gt, want_usage=want_usage, usage_timeout=60.0,
-                             usage_until=(clock.t0 + total - margin) if total else None, usage_prev=u0, answers_image=image)
+                             usage_until=(clock.t0 + total - margin) if total else None, usage_prev=u0, answers_image=image,
+                             evidence_held=True)   # this refresh holds the publish lock: its evidence pass runs inside it
         except K.GitCollectError as ex:
             raise EmbedError("git_error: %s" % ex)
         except K.AnswersUnreadable as ex:
@@ -588,6 +667,10 @@ def embed_mechanical(root, clock, apply_answers=False):
         cmp0 = K.compare_keys(jk, snap["key"], snap)
         for p in cmp0["adopt"]:   # a watched path hashed completely for the first time adopts that hash
             jk["watch_hashes"][p] = snap["key"]["watch_hashes"][p]
+        if "evidence_lost" not in cmp0["moved"]:
+            # 15.1: no loss the judged key is not already carrying. Whatever it carried verified again (the fresh set is empty), so the
+            # refresh rebases the component; when the key HAS moved (a loss, or carried repairs still pending) it stays judged
+            jk["evidence_lost"] = list(snap["key"]["evidence_lost"])
         cmp = K.compare_keys(jk, snap["key"], snap)
         notes, focus, image_lines = [], None, None
         if apply_answers:
@@ -597,7 +680,7 @@ def embed_mechanical(root, clock, apply_answers=False):
             else:
                 image_lines = image[0]
                 ph = K.prefix_hash(image_lines, len(image_lines))
-                jk["answers_count"], jk["intent_hash"] = snap["key"]["answers_count"], focus["hash"]   # the key now includes the lines
+                jk["answers_count"], jk["intent_hash"] = snap["key"]["answers_count"], focus["accepted"]["hash"]   # the key now includes the lines
                 snap = dict(snap, answers=dict(snap["answers"], applied=len(image_lines), applied_hash=ph, pending=[]))
                 cmp = K.compare_keys(jk, snap["key"], snap)
         S = copy.deepcopy(S0)
@@ -619,7 +702,9 @@ def embed_mechanical(root, clock, apply_answers=False):
                           if (cmp["moved"] or replay) else None)
             T["template_hash"], T["embed_hash"], T["judged_key"] = th, eh, jk
             if focus is not None:   # the owner confirmed the focus the last assessment served: the record, the answers it consumed
-                it = dict(T.get("intent") or {}, accepted=copy.deepcopy(focus))   # target and any later key (drift) stay as judged
+                it = dict(T.get("intent") or {}, accepted=copy.deepcopy(focus["accepted"]))   # target stays as judged
+                if isinstance(focus.get("drift"), dict):   # the same reducer kept the drift record (an F-set clears a revision request)
+                    it["drift"] = copy.deepcopy(focus["drift"])
                 T["intent"] = K.reconcile_intent(it)
                 T["answers"] = dict(T["answers"], total=len(image_lines), applied=len(image_lines),
                                     applied_hash=snap["answers"]["applied_hash"])
@@ -634,10 +719,14 @@ def embed_mechanical(root, clock, apply_answers=False):
             for r_ in T["repos"]:   # tags and sync are facts, refreshed on every render; the judgement stays as it was
                 if r_.get("path") in fresh:
                     r_["release"] = fresh[r_["path"]]
+                    r_.pop("inaccessible", None)   # J1: the repository was read as git again
                 else:
                     r_.pop("release", None)
-            # `since` and `judged_seen` describe the JUDGED batch and stay as they were (live drift is `stale`, set above); the
-            # assurance is recomputed from this refresh's own facts: stale, coverage, release and the decisions left open
+            # 3.6: the completion evidence is a fact of THIS refresh's own pass: the view, the unverified marks (set for every known
+            # loss, cleared only when the ref verified ok again) and, below, the assurance all follow the snapshot
+            VAL.apply_evidence(T, snap["evidence"])
+            # `since`, `fit` and `judged_seen` describe the JUDGED batch and stay as they were (live drift is `stale`, set above); the
+            # assurance is recomputed from this refresh's own facts: stale, coverage, release, evidence and the decisions left open
             T["assurance"] = VAL.assurance(T)
             plan = C.loads(C.read_pinned(pm, prev["src"], "plan.json") or b"{}")
             J = C.loads(C.read_pinned(pm, prev["src"], "judgement.json") or b"{}")

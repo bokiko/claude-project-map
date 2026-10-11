@@ -11,10 +11,10 @@
 
 <!-- TECH BADGES: flat-square style, unified color 2ecc71 -->
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.5.0-2ecc71?style=flat-square" alt="Version 3.5.0">
+  <img src="https://img.shields.io/badge/Version-3.6.0-2ecc71?style=flat-square" alt="Version 3.6.0">
   <img src="https://img.shields.io/badge/Python-3.9%2B-2ecc71?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Bash-3.2%2B-2ecc71?style=flat-square&logo=gnubash&logoColor=white" alt="Bash">
-  <img src="https://img.shields.io/badge/Tests-3371%20passing-2ecc71?style=flat-square" alt="3371 tests passing">
+  <img src="https://img.shields.io/badge/Tests-3629%20passing-2ecc71?style=flat-square" alt="3629 tests passing">
   <img src="https://img.shields.io/badge/License-MIT-2ecc71?style=flat-square" alt="License MIT">
 </p>
 
@@ -97,6 +97,8 @@ After an update, run `/reload-plugins` or start a new session. The map of a mapp
 
 - **Since the previous assessment:** (new in 3.4) the first thing under the header: commits landed and files uncommitted since Claude last assessed the project, up to three changes (each `landed, not checked by the map` or `uncommitted`), the one item that deserves your attention, and what the map could not check. A decision that waits for you is always that item. When the model saw only part of the new work, it says so (`40 of 60 commits shown to the model`).
 - **Focus and handoff:** (new in 3.5) the map proposes one immediate objective and what done means for it, and says plainly that it is only a proposal until you confirm it (the page shows it under the attention item, the brief on a `focus:` line). A "Handoff" row, first in the context list, holds a bounded text for the next agent or session (focus, done when, out of scope, where it stands, the next step, what needs you, and a standing reminder that it is context, not permission) with a Copy button; the same text is `.project-map/handoff.txt`.
+- **Completion unverified:** (new in 3.6) every finished criterion and part points at a file or commit. The scripts re-check those references a few at a time on every run; one that is gone is marked "completion unverified" on the page (with the reason), counted in the progress tile and named on a brief line (`evidence lost: P5.c3 (<ref>)`). Nothing is flipped for you: the item stays done until the next assessment repairs it (reopened, or given a new reference that exists), and the map does not call itself "Nothing needs you" while any reference is unchecked or unverified. A reference that cannot be read (a permission error, a timeout) is never called lost; it just keeps the check incomplete.
+- **Fit and drift:** (new in 3.6) once you have confirmed a focus, each assessment also says whether the work it saw fits it (`consistent`, `departure` with the reason, or `unknown`) and how much of the work it saw (`12 of 30 commits shown`). A departure is cited only against things the model was actually shown. One departure is a note; a second one on different new work, or one that breaks something you listed as out of scope, raises a single question ("keep the focus / revise it / unclear"). Answer A and the map will not ask again about the same evidence; answer B and the brief asks for your new focus until you say it.
 - **Top of the page:** the project name, its folder, the branch and short commit, when the snapshot was taken, and whether anything needs you. The headline under it is the main thing to know right now.
 - **Tiles:** a few at-a-glance numbers: the current phase, checks done out of total, the next step with who needs to act, and whether a decision waits for you.
 - **Phase list:** every phase is marked done, current, next or later, with its own checks done out of total. The current phase is open (“where we are”); the next phase sits beside it (“what's coming”).
@@ -134,7 +136,7 @@ See the [FAQ](docs/FAQ.md) for safety, costs, updates, and uninstalling.
 
 ## For developers
 
-Current plugin version: **3.5.0**. Projects without Git history are supported; they use documents and file modification times.
+Current plugin version: **3.6.0**. Projects without Git history are supported; they use documents and file modification times.
 
 ### Local installation
 
@@ -172,7 +174,7 @@ Outputs in `<ROOT>/.project-map/`: an immutable `gen-<seq>-<id>/` per published 
 
 ### How it works
 
-1. `scripts/project-map-facts.py` uses the Python standard library and prints a verdict. Its change key covers repository heads and branches, the working-tree signature, watched files (hashed by content), the ledger, answers, the focus you confirmed (3.5), and expired deadlines. Scripts own the decision lifecycle. Confirming exactly the focus the last assessment proposed is applied by the scripts without a model call.
+1. `scripts/project-map-facts.py` uses the Python standard library and prints a verdict. Its change key covers repository heads and branches, the working-tree signature, watched files (hashed by content), the ledger, answers, the focus you confirmed (3.5), the references of finished work that are gone (3.6), and expired deadlines. Scripts own the decision lifecycle. Confirming exactly the focus the last assessment proposed is applied by the scripts without a model call.
 2. When judgement is needed, facts stages an invocation folder (`inv-<id>/`). The skill spawns the `project-map` agent with three prompt lines (`ROOT`, `INV`, `RUN`). The agent Reads the bounded `pack.json` (8 KB maximum) and the frozen `judgement.in.json`, writes `judgement.out.json` (3 KB target, 6 KB hard limit; FULL also `plan.out.json`) and runs the embed. Routine updates allow at most 8 tool calls.
 3. `scripts/project-map-embed.py` validates ids, evidence references, hard rules, frozen decisions and path confinement, then publishes a new generation under a lock, only if the generation the agent judged is still current. If another run published first, the result is `SUPERSEDED` and nothing is lost.
 4. The agent returns `ASK:` lines because it cannot ask questions directly. The main session asks you, appends the answer to `.project-map/answers.jsonl`, and reruns `/project-map`. Hard-rule decisions never auto-default. “Where are we?” uses `brief.txt`, not `state.json`.
@@ -209,9 +211,9 @@ Every deny is logged to `~/.claude/agent-memory/project-map/guard.log`. These ch
 
 ```bash
 bash tests/test_guard.sh    # 1053 cases: guard modes, binding, background launches, grammar, secret paths
-bash tests/test_embed.sh    # 1541 cases: facts + embed, generations, locks, migration, usage never failing a refresh, decisions overtaken by events, since / seen / assurance / brief / page (RB-*), confirmed focus / model-free confirmation / handoff (FC-*; PM_FC_ONLY=1 runs these alone)
+bash tests/test_embed.sh    # 1794 cases: facts + embed, generations, locks, migration, usage never failing a refresh, decisions overtaken by events, since / seen / assurance / brief / page (RB-*), confirmed focus / model-free confirmation / handoff (FC-*; PM_FC_ONLY=1 runs these alone), lost completion evidence / fit / drift (DR-*; PM_DR_ONLY=1 runs these alone)
 bash tests/test_git.sh      # 416 cases: pm_git core and the pm-git.sh agent wrapper
-bash tests/test_hooks.sh    # 146 cases: SessionStart, UserPromptSubmit, SubagentStart/Stop hooks, preflight sentences
+bash tests/test_hooks.sh    # 151 cases: SessionStart, UserPromptSubmit, SubagentStart/Stop hooks, preflight sentences
 bash tests/test_usage.sh    # 215 cases: incremental usage scan equals a full rescan, cache reuse, private counters-only output, budget and resume
 ```
 

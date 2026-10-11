@@ -68,9 +68,35 @@ def valid_intent(stage):
     return {"outcome": acc["outcome"], "done_when": acc["done_when"]} if isinstance(acc, dict) else dict(PROPOSAL)
 
 
+def staged_pack(stage):
+    try:
+        return json.load(open(os.path.join(stage, "pack.json"))) if stage else None
+    except (OSError, ValueError):
+        return None
+
+
+def resolve_repairs(J, P, pack, stage):
+    """15.1: every completion loss the pack LISTS (`repairs.lost`) is resolved the way a careful model would: a criterion is set
+    done:false (a criteria_updates entry), a part stops being done (its ref dropped). Losses the pack does not list are left alone:
+    they are the carried ones the exception allows."""
+    lost = ((pack or {}).get("repairs") or {}).get("lost") or []
+    if not lost:
+        return
+    cids = {c["id"] for ph in (P["phases"] if P else json.load(open(os.path.join(stage, "plan.json")))["phases"]) for c in ph["criteria"]}
+    for e in lost:
+        if e["id"] in cids:
+            J.setdefault("criteria_updates", []).append({"id": e["id"], "done": False})
+        else:
+            for p in J["parts"]:
+                if p["id"] == e["id"] and p["status"] == "done":
+                    p["status"] = "in_progress"
+                    p.pop("ref", None)
+
+
 def build(inv, kind, stage=None):
     """Judgement + plan shaped like the demo-app fixture, in the 3.2 schema (+ the 3.4 `since` block when the pack has a baseline,
-    + the 3.5 `intent`)."""
+    + the 3.5 `intent`, + the 3.6 `fit` (unknown) when the pack carries an intent and a baseline, and the resolution of the
+    completion losses the pack lists)."""
     F = json.load(open(FIX))
     parts = []
     for p in F["parts"]:
@@ -107,6 +133,11 @@ def build(inv, kind, stage=None):
     snap = staged_snapshot(stage) if stage else None
     if (snap.get("since") is not None) if snap is not None else kind == "update":
         J["since"] = valid_since(J, snap)
+    pack = staged_pack(stage)
+    it = (pack or {}).get("intent") or {}
+    if pack is not None and pack.get("since") is not None and (it.get("accepted") or it.get("proposed")):
+        J["fit"] = {"verdict": "unknown"}   # always legal (15.2); tests that need a departure write their own
+    resolve_repairs(J, P if kind == "full" else None, pack, stage)
     return J, P
 
 

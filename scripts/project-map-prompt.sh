@@ -68,11 +68,25 @@ LINE=$(printf '%s\n' "$OUT" | grep -E '^(PM_EMBED_|SUPERSEDED)' | tail -n 1)
 [ -n "$LINE" ] || LINE=$(printf '%s\n' "$OUT" | grep -v '^$' | tail -n 1)
 LINE=$(printf '%s' "$LINE" | LC_ALL=C tr -cd '\11\40-\176' | cut -c1-300)
 
-# read-modify-write cache.json through a temp file + rename; $1 = ok|fail
+# read-modify-write cache.json through a temp file + rename; $1 = ok|fail. 3.6: under the publish lock, like every other writer of
+# that file (the completion-evidence record lives in it and must never be rolled back by a stale read); a lock that stays busy for
+# 2 s skips the write (the next prompt tries again)
 update_cache() {
   python3 - "$CACHE" "$1" "$TH" "$EH" <<'PY' 2>/dev/null
-import sys, os, json, time
+import sys, os, json, time, fcntl
 p, mode, th, eh = sys.argv[1:5]
+try:
+    lk = os.open(os.path.join(os.path.dirname(p), ".lock"), os.O_RDWR | os.O_CREAT, 0o644)
+    for _ in range(40):
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        sys.exit(0)
+except OSError:
+    sys.exit(0)
 try:
     d = json.load(open(p))
     if not isinstance(d, dict): d = {}

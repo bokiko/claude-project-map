@@ -798,3 +798,134 @@ therefore accepted; a judgement that raises a retired id again is still refused 
 next step in priority, not a needs-you line; the 1000-byte cap and whole-line rule are unchanged). Page: a "Resolved by events" panel
 in the current phase, textContent only; the "Needs you" tile and pill do not count it. `changes[]` and the history entry's `changed[]`
 carry `{id:"D-001", label:"D-001", text:"overtaken: <why>"}`; the history entry's `decisions_closed` lists it.
+
+
+## 13. 3.4.0: make returning easy (return brief)
+
+Problem: the first screen and the brief led with phase counts and the headline; what changed since the last assessment and what
+deserves attention were buried, and a returning owner re-read chats. Everything below is additive: `state.schema` stays
+`project-map-4`, `state.focus` keeps its meaning, the byte limits do not move (pack 8192, judgement hard 6144, brief 1000 with the
+newline), there is no new model call, and a refresh with no relevant change stays model-free. Design: `docs/PLAN-v3.4-3.6.md` section 13.
+Supersedes the line layout of 6.6 and the line-2 description in 5.1; extends 6.1, 6.2, 6.4 and 6.5.
+
+13.1 **Baseline** (script-owned; `pm_collect.since_baseline`). `snapshot.since = {generation, assessed_at, commits, dirty, hours}`:
+`generation` is the generation that was current when facts collected, `assessed_at` is that state's `judged_at`, `commits` is
+`commits.count` (counted against `judged_key.heads`, which a mechanical refresh keeps, so the baseline is always the previous
+JUDGED generation, never "your last visit"), `dirty` is `status.dirty`, `hours` is whole hours since `assessed_at` (null when it does
+not parse). `null` on a first map and on a 3.x migration: there is no previous assessment.
+
+13.2 **Model output** (`judgement.out.json`, new top-level key `since`, unknown keys rejected). Required on every UPDATE and FULL whose
+pack carries a non-null `since`; absent or `null` otherwise (`since must be absent or null` on a first map).
+```
+since: {
+  changes:     [ {text 1..120, state: "landed"|"uncommitted", ref: ref|null} ]   0..3, most consequential first, texts unique
+  attention:   {kind: "decision"|"continue"|"waiting"|"unchecked", text 1..120, why 1..120, id: D-nnn}                       R
+  not_checked: [ 1..80 ]                                                                                                  O, 0..3
+}
+```
+- `text` states the consequence ("Import landed; nothing here shows it works"), not a commit subject. Uniqueness ignores case and
+  spacing. There is no "checked" state: a 4-call UPDATE cannot establish that behaviour was verified and a resolving ref proves only
+  that a file or commit exists. Page and brief say `landed, not checked by the map`; what would show it works belongs in `not_checked`.
+- `landed`: `ref` is required and is `commit:<sha7+>` resolving in a known repository (`cat-file`); `file:<rel>[:line]` is accepted
+  only when the ROOT repository has `vcs != "git"` (a project without git), and must resolve. `uncommitted`: `ref` is optional, `file:`
+  only, and must resolve.
+- `attention` is exactly one item. `kind: decision` carries `id` (and no other kind does): a decision that is `open`/`overdue` with
+  `ready != false` in the STAGED snapshot and not closed by `overtaken` in this judgement, or raised in this judgement with
+  `ready != false`. Whenever such a decision exists, `kind` MUST be `decision` (message: `since.attention.kind must be decision (id D-002):
+  D-002 open and ready, ...`); an `id` outside that set is rejected. `continue`: work proceeds without the owner. `waiting`: blocked
+  outside the project. `unchecked`: the pack did not allow a judgement. `why` is the consequence of waiting / of not checking.
+- Every string passes the existing control-character and secret scans.
+
+13.3 **What the model saw** (script-owned). `pack.since` is the snapshot's, `pack.seen` is computed by `build_pack` from the FINAL pack
+object, after the last trim step that ran, and counted in the 8192-byte check (after each step the pack is measured with its current
+`seen`; over the cap means the next step runs and `seen` is recomputed; `seen` and `since` are never trimmed):
+`{commits, commits_total, dirty, dirty_total, decisions_cut, answers_dropped, ledger_cut, repos_cut, watch_moved, watch_moved_cut}`.
+`commits` = commit items still listed (the collector itself lists at most 40, so it never exceeds what was listed), `commits_total` =
+`commits.count`, `dirty` = `dirty_paths` kept, `dirty_total` = `status.dirty`, `decisions_cut` = staged decisions the pack lost or whose
+`q` / option labels it cut, `answers_dropped` = pending answers removed, `ledger_cut` = a ledger field shortened or the ledger gone,
+`repos_cut` = repositories removed, `watch_moved` = watched paths whose hash moved against `snapshot.prev_key.watch_hashes` (a
+`partial` hash on either side, or a path the judged key did not have, is not a move), `watch_moved_cut` = of those, the ones the pack no
+longer lists, by ANY step (the >40 cut and the whole-list drop included). Hash-only cuts, recent tags and usage detail are not omissions.
+At a judged publication embed reads `STAGE/pack.json` (the file the model read, never the pack `finish_files` rebuilds) and stores a
+well-formed `seen` as `state.judged_seen`; a pack of another invocation, without `seen`, or with a malformed one gives `null`
+(unknown coverage). A mechanical refresh carries it. "Relevant work omitted" = `commits < commits_total`, `dirty < dirty_total`,
+`decisions_cut`, `answers_dropped`, `ledger_cut`, `repos_cut` or `watch_moved_cut > 0`.
+
+13.4 **Assurance** (script-owned; ONE predicate, `pm_validate.assurance(S)`, used by `build_state` and by every mechanical refresh).
+`state.assurance = {ok, why[<=40 bytes each]}`; `ok` iff no clause adds a reason, in this order: `decision open` (a ready open/overdue
+decision); `assessment behind: <stale.why>`; `coverage partial`; `git error`; `tags unverified` (a release entry partial, unverified or
+inconsistent); `attention not assessed` (no `since.attention`) or `attention: waiting|unchecked` (anything but `continue`; `decision`
+is already `decision open`); `pack coverage unknown` (`judged_seen` null) or the omitted-work phrases (`12 of 30 commits shown to the
+model`, `20 of 134 changed files shown`, `2 decisions cut in the pack`, `1 answers left out of the pack`, `ledger cut in the pack`,
+`2 repos left out of the pack`, `1 changed watch files not shown`). (3.5) `focus changed after the assessment` and (3.6) the evidence
+clauses join this function. **Three-way wording**, `pm_validate.needs_text(S)` (the template implements the same rule in JavaScript):
+(a) a ready open/overdue decision exists -> `Needs you`; (b) none and `assurance.ok` -> `Nothing needs you`; (c) none and not ok ->
+`No decision identified in the checked information` plus the reasons. Hook: a facts verdict carrying `(deferred: budget)` makes the
+SessionStart context `project-map: facts not refreshed (budget); run /project-map`; the brief on disk is not presented as refreshed.
+
+13.5 **State and page.** `state.since = {from: {generation, assessed_at}, commits, listed, dirty, hours, changes[], attention,
+not_checked[]}` (`null` on a first map): the script's counts as staged, `listed = judged_seen.commits`, the model block verbatim.
+`state.judged_seen`, `state.assurance`, `state.status.git_error` are new. A mechanical refresh keeps `since` and `judged_seen` (they
+describe the judged batch; live drift is `stale`) and recomputes `assurance`. **Reconciled attention** (one code path, `build_state`,
+after the final answers, deferred closures and late answers): against the FINAL ready open/overdue decision ids, (i) a judged attention
+naming one of them is kept; (ii) otherwise, when such ids exist, it becomes `{kind: "decision", id: <lowest id>, text: <its q cut to
+120>, why: "still open at publication", by: "script"}`; (iii) a judged attention that named a decision when none remains becomes
+`{kind: "unchecked", text: "<id> was answered after the assessment; attention not reassessed", why: "pending the next judgement", by:
+"script"}`. In (ii) and (iii) the model's block is kept as `since.attention_judged`. An answered id is never shown as a current owner
+decision. Page: a `#since` section between the header and the tiles (eyebrow `Since the previous assessment · <date>`, `<N> commits
+· <M> uncommitted files` plus ` · <listed> of <N> shown to the model` when `listed < N`, the attention row, up to 3 change rows
+`<text> · landed, not checked by the map | uncommitted`, `not checked: ...`); absent when `state.since` is missing. Pill and "Needs
+you" tile follow 13.4 (case c: tile `None found`, its note lists the first two reasons, the Snapshot disclosure lists all of them); a
+stale map shows `Assessment may be out of date · <why>` as its own line. A state without `assurance` (before 3.4) keeps the earlier
+pill. Everything goes through `textContent`.
+
+13.6 **Brief** (<= 1000 bytes including the final newline, whole lines, fixed display order, dropped by priority):
+```
+1 <name> · <folder> · phase k/n <label> · <tone>
+2 as of <snapshot minute> · assessed <judged minute> · current | behind: <stale.why cut to 60> [· <qualifier cut to 40>]
+3 <headline>
+4 D-004 needs you: ... (then +N more decisions)
+5 attention: <text> · <why>                       (omitted when kind is decision and its D line is shown)
+6 next: <title> (<actor>)
+7 since <assessed minute>: <N> commits · <M> uncommitted · <k> changes [· <listed> of <N> shown]
+8 - <text> · landed, not checked | uncommitted    (0..3)
+9 D-001 overtaken by events: ...
+10 git: <release line>
+11 stale: ... / coverage partial a/b
+12 tokens ...
+13 generation <seq>-<id>
+```
+(3.5 adds 6b after 6, 3.6 adds 11b after 11.) Line 2 is never dropped; its qualifier is the first `assurance.why` and is present only in
+case (c); a map that is behind already says why on that line, so its own `assessment behind` reason is not repeated. `_fit_folder` keeps
+a `~` or short path up to 60 bytes, else `…/<last two components>`, cut to 60 bytes at a character boundary with `…`. Drop order when
+over the cap: 12, 10, 8 (last first), 7, 5, 9 (last first), 11 (coverage first), then the decisions collapse into `+N more decisions`;
+lines 1-3, 6 and the trailer are never dropped (with every capped field at its maximum they take 664 bytes). Superseded: the old
+`assessment <minute> · current | N commits since` line 2, and the `git:` line right after the headline.
+
+13.7 **Pack, prompt, skill.** Pack: `since` and `seen`. Agent prompt (`agents/project-map.md`) and `full-run.md`: the `since` rules
+(consequence not subject; `landed` needs a commit; no "checked"; a decision is always the primary attention; `seen` says what was cut:
+never `continue` as if the batch were complete), judgement size target 3.5 KB, hard 6 KB. SKILL.md is unchanged: the brief carries the
+block and the SessionStart hook prints it.
+
+13.8 **Tests.** `tests/test_embed.sh` section 14 (RB-required, RB-landed-ref, RB-attention, RB-seen and the unit cases on `build_pack`,
+RB-assurance with brief line 2 and the page, RB-baseline, RB-brief-max with the exact drop order, RB-page, RB-reconcile,
+RB-watch-omitted), `tests/test_hooks.sh` (H-deferred, H-since). The page cases run the template's own JavaScript in Node against a small
+DOM shim (`tests/pm_page.js`) and are skipped without Node. `tests/pm_testlib.py` writes a valid `since` for every UPDATE (and for a FULL
+whose pack carries a baseline), computing its attention with the validator's rule after the test's own edits, so older cases are unchanged.
+
+13.9 **Decisions taken while implementing** (the design left them open):
+1. A state with no `since.attention` (a first map, a 3.x migration, a generation from before 3.4) is `ok: false` with `attention not
+   assessed`, and a missing `judged_seen` is `pack coverage unknown`: such a map says `No decision identified in the checked information`
+   instead of `Nothing needs you` until its first 3.4 judgement. The first map's brief therefore ends line 2 with that reason.
+2. "The facts run was cut by its budget" has no state of its own: a facts run that runs out before it has collected publishes nothing
+   (`(deferred: budget)`, handled by the hook), and a run that hashes out of time publishes `coverage partial`, which is the clause.
+   The same holds at publication: a path the judgement adds to `watch` is hashed by embed (20 s), its counts join the published
+   `coverage`, and a path it could not hash completely makes that coverage `partial` (Codex implementation review, I1).
+3. `status.git_error` is carried into the state (it is always null today, since a git failure aborts the run) so the clause reads the state.
+4. The forcing rule reads `ready` from the STAGED snapshot. A decision the judgement flips to ready is not forcing; the reconciliation
+   in 13.5 picks it up at publication and the page shows it as a decision.
+5. Line 5 is omitted when the attention is a decision whose D line is among the decision lines before the `+N more` collapse.
+6. Line 2's qualifier skips the `assessment behind` reason (the line already says `behind: <why>`); another reason, if any, follows.
+7. `decisions_cut` also counts decisions the pack lost entirely; `answers_dropped` counts removed pending entries, not shortened notes.
+8. Wording is not pluralised (`1 commits`), as in the existing lines.
+9. Last resort for a hand-made oversized state: the next-step and headline lines are dropped, never line 2, line 1 or the trailer.

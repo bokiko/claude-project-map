@@ -295,6 +295,16 @@ def light_stale(root, snap, judged_at, clock=None):
     return {"judged_at": judged_at, "commits_since": n, "why": " and ".join(why)} if why else None
 
 
+def staged_seen(stage, inv_name):
+    """13.3: the `seen` record of the pack the model READ (STAGE/pack.json), not of the pack finish_files rebuilds for the
+    generation. None when the file is missing, belongs to another invocation or carries no well-formed `seen` (a pack from
+    before 3.4): the assurance then says "pack coverage unknown"."""
+    pk = C.load_json(os.path.join(stage, "pack.json"))
+    if isinstance(pk, dict) and pk.get("generation") == inv_name and K.valid_seen(pk.get("seen")):
+        return dict(pk["seen"])
+    return None
+
+
 def _read(path, maxb=None):
     try:
         with open(path, "rb") as fh:
@@ -323,6 +333,7 @@ def embed_normal(root, inv_name, clock):
         snap = C.load_json(os.path.join(stage, "snapshot.json"))
         if not isinstance(snap, dict) or snap.get("generation") != inv_name:
             raise EmbedError("snapshot.json is missing or does not belong to %s" % inv_name)
+        judged_seen = staged_seen(stage, inv_name)
         plan_in = C.load_json(os.path.join(stage, "plan.json"))
         jin = C.load_json(os.path.join(stage, "judgement.in.json"), {})
         raw = _read(os.path.join(stage, "judgement.out.json"))
@@ -409,14 +420,21 @@ def embed_normal(root, inv_name, clock):
         key = copy.deepcopy(snap["key"])
         kept_h = {p: h for p, h in key["watch_hashes"].items() if p in J["watch"]}
         new_paths = [p for p in J["watch"] if p not in kept_h]
+        status2 = snap["status"]
         if new_paths:
-            wl, _c, _t = K.hash_watch(root, new_paths, {}, time.monotonic() + 20.0)
+            # test hook PM_EMBED_WATCH_DEADLINE: seconds for this publication-time check (default 20)
+            wl, c_, t_ = K.hash_watch(root, new_paths, {}, time.monotonic() + float(os.environ.get("PM_EMBED_WATCH_DEADLINE") or 20.0))
             kept_h.update({w["path"]: w["hash"] for w in wl})
+            # the check is part of what this generation publishes: its counts join the coverage, and a path it could not
+            # hash completely makes the coverage partial (13.4: the assurance never certifies an incomplete check)
+            status2 = dict(status2, covered=status2["covered"] + c_, total=status2["total"] + t_)
+            if c_ < t_ or any(w["hash"] == "partial" for w in wl):
+                status2["coverage"] = "partial"
         key["watch_hashes"] = kept_h
         led, sled = K.parse_ledger(root, J["project"].get("ledger")), snap.get("ledger")
         if not ((led and sled and led["path"] == sled["path"]) or (not led and not sled)):
             key["ledger_hash"] = led["hash"] if led else None
-        snap2 = dict(snap, template_hash=th, embed_hash=eh, key=key)
+        snap2 = dict(snap, template_hash=th, embed_hash=eh, key=key, status=status2)
         # an owner answer that arrived while the judgement was written outranks a closure by events for the same decision:
         # re-read answers.jsonl under the lock (never written, never consumed as bad input)
         notes = []
@@ -450,7 +468,7 @@ def embed_normal(root, inv_name, clock):
 
         def make(genstr):
             c = {"root": root, "snap": snap2, "J": J, "plan": final_plan, "prev": pseudo, "genstr": genstr, "base": cur,
-                 "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale}
+                 "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale, "judged_seen": judged_seen}
             S = VAL.build_state(c)
             if prevp["kind"] != "v4":
                 S["changes"] = []
@@ -546,6 +564,9 @@ def embed_mechanical(root, clock):
                     r_["release"] = fresh[r_["path"]]
                 else:
                     r_.pop("release", None)
+            # `since` and `judged_seen` describe the JUDGED batch and stay as they were (live drift is `stale`, set above); the
+            # assurance is recomputed from this refresh's own facts: stale, coverage, release and the decisions left open
+            T["assurance"] = VAL.assurance(T)
             plan = C.loads(C.read_pinned(pm, prev["src"], "plan.json") or b"{}")
             J = C.loads(C.read_pinned(pm, prev["src"], "judgement.json") or b"{}")
             return {k: (v_.encode("utf-8", "replace") if isinstance(v_, str) else v_)

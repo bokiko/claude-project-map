@@ -154,7 +154,8 @@ t_true "E-brief <= 1000 bytes" "[ \$(wc -c < $PM/brief.txt) -le 1000 ]"
 t_true "E-brief line 1 folder: last two components after an ellipsis, no mid-component cut" "head -1 $PM/brief.txt | grep -qE ' · …/[^/ ]+/[^/ ]+ · phase'"
 t_pre "E-brief line 1 starts with the project name" "$(head -1 "$PM/brief.txt")" "demo-app · "
 t_true "E-brief line 1 ends with '· phase k/n <label> · <tone>'" "head -1 $PM/brief.txt | grep -q ' · phase 2/3 Full-model check passes · watch\$'"
-t_pre "E-brief line 2 = assessment <minute> · current" "$(sed -n 2p "$PM/brief.txt")" "assessment 20"
+t_pre "E-brief line 2 = as of <minute> · assessed <minute> · current" "$(sed -n 2p "$PM/brief.txt")" "as of 20"
+t_true "E-brief line 2 names both times: snapshot minute, then assessment minute" "sed -n 2p $PM/brief.txt | grep -qE '^as of 20[0-9-]+T[0-9:]{5} · assessed 20[0-9-]+T[0-9:]{5} · current'"
 t_has "E-brief line 2 ends with '· current'" "$(sed -n 2p "$PM/brief.txt")" "· current"
 t_eq "E-brief line 3 is the headline" "$(sed -n 3p "$PM/brief.txt" | cut -c1-29)" "Full-model check failed twice"
 t_has "E-brief names the next step" "$(cat "$PM/brief.txt")" "next: Finish the cycle-2 diagnosis report (claude)"
@@ -178,7 +179,7 @@ upd 'J["headline"]["text"]="dirty"'; t_pre "E-dirty file published" "$eo" "PM_EM
 t_eq "F-key calm after the dirty file was judged" "$(facts)" "NO_CHANGE nothing moved"
 echo "two two" > "$R/u.txt"; out=$(facts); t_has "F-key second edit of an already-dirty file is seen" "$out" "working tree changed"
 git -C "$R" add -A; git -C "$R" commit -qm "more"; out=$(facts); t_has "F-key new commit -> N new commits" "$out" "1 new commits"
-t_true "F-stale-refresh: the brief shows '1 commits since' after a verdict that spawns" "sed -n 2p $PM/brief.txt | grep -q '1 commits since'"
+t_true "F-stale-refresh: the brief shows 'behind: 1 new commits' after a verdict that spawns" "sed -n 2p $PM/brief.txt | grep -q 'behind: 1 new commits'"
 t_eq "F-stale-refresh: state.stale has judged_at, commits_since, why" "$(S '(d["stale"]["commits_since"], d["stale"]["why"].startswith("1 new commits"), "judged_at" in d["stale"])')" "(1, True, True)"
 t_eq "F-stale-refresh: the page itself stays at the judged state (headline unchanged)" "$(S 'd["headline"]["text"]')" "dirty"
 upd 'J["headline"]["text"]="after commit"'; t_pre "E-rejudge after a commit publishes" "$eo" "PM_EMBED_OK"
@@ -1181,15 +1182,17 @@ PYEOF
 )" "True True True"
 
 
-# brief: the release line sits after the headline and never pushes out decisions or the next step
-t_eq "REL-brief: line after the headline; decisions and next kept; saturated brief identical with and without it" "$(python3 - "$HOOKS" "$TD/../docs/demo-state.json" <<'PYEOF'
+# brief: the release line ranks below the next step (3.4.0 display order, 13.6) and never pushes out decisions or the next step
+t_eq "REL-brief: line below the next step; decisions and next kept; saturated brief identical with and without it" "$(python3 - "$HOOKS" "$TD/../docs/demo-state.json" <<'PYEOF'
 import copy, json, sys
 sys.path.insert(0, sys.argv[1])
 import pm_render as R
 S = json.load(open(sys.argv[2]))
 S["repos"][0]["release"] = {"line": "tagged v3.2.3 at HEAD \u00b7 in sync with origin/main (local tracking state)"}
 L = R.brief(S).splitlines()
-ok1 = L[3].startswith("git: tagged v3.2.3 at HEAD") and any(x.startswith("D-001 needs you") for x in L) and any(x.startswith("next:") for x in L)
+gi = next((i for i, x in enumerate(L) if x.startswith("git: tagged v3.2.3 at HEAD")), -1)
+ni = next((i for i, x in enumerate(L) if x.startswith("next:")), 99)
+ok1 = 0 < gi and ni < gi and any(x.startswith("D-001 needs you") for x in L)
 T = copy.deepcopy(S)
 T["decisions"] = [dict(T["decisions"][0], id="D-%03d" % i, q="q" * 140, status="open") for i in range(8)]
 A = R.brief(T)
@@ -2715,5 +2718,537 @@ t_eq "OV-R4-1: late_answers works from the caller's read image (file never opene
 # the embed block performs exactly one read for both checks (static guard against a second read creeping back)
 n=$(grep -c "K.read_answers_ex(pm)" "$HOOKS/project-map-embed.py"); t_eq "OV-R4-1: embed reads answers.jsonl once in the closure block" "$n" "1"
 t_true "OV-R4-1: embed passes that read to late_answers" "grep -q 'K.late_answers(pm, snap, closing, image=lines)' '$HOOKS/project-map-embed.py'"
+
+# ======================================================================================================
+# 14. 3.4.0: make returning easy (RB-*): since, seen, assurance, brief, page (INTERFACES-3.2 section 13)
+# ======================================================================================================
+HAVE_NODE=0; command -v node >/dev/null 2>&1 && HAVE_NODE=1
+rbpage() { PAGE=$(node "$TD/pm_page.js" "$PM/index.html" "$@" 2>&1); }   # [STATE_PATCH_JSON]: what the page JavaScript renders
+pj()  { printf '%s' "$PAGE" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(eval(sys.argv[1]))' "$1"; }
+ax()  { AXJ=$(lib assure "$PM/state.json" "$1"); }                      # CODE edits the published state in memory, then assurance()
+axq() { printf '%s' "$AXJ" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(eval(sys.argv[1]))' "$1"; }
+bf()  { lib brief "$PM/state.json" "$1"; }                               # CODE edits the published state in memory, then the brief
+RB_D3='J["decisions"].append({"id":"D-003","q":"Third question?","options":[{"id":"A","label":"Yes"},{"id":"B","label":"No"}],"recommended":"A","default":"hold","hard_rule":None,"deadline":None,"ready":True})'
+RB_CLOSE='J["decisions"][1]["overtaken"]={"why":"Owner tagged v1.0.0 and pushed by hand"}'
+RB_RDY2='J["decisions"][1]["ready"]=True'
+RB_SEEN_KEYS="['answers_dropped', 'commits', 'commits_total', 'decisions_cut', 'dirty', 'dirty_total', 'ledger_cut', 'repos_cut', 'watch_moved', 'watch_moved_cut']"
+
+# ---- RB-required: since is required exactly when the pack carries a baseline
+mkrepo rb0; begin
+t_eq "RB-required: a first map's pack has since null and the seen record" "$(get "$STAGE/pack.json" '(d["since"], sorted(d["seen"]))')" "(None, $RB_SEEN_KEYS)"
+t_eq "RB-required: ... and the snapshot has since null too" "$(get "$STAGE/snapshot.json" 'd["since"]')" "None"
+rej "RB-required: a first map must not carry since" 'J["since"]={"changes":[],"attention":{"kind":"continue","text":"x","why":"y"}}' "since must be absent or null" full
+pub '' full
+t_pre "RB-required: a first map without since publishes" "$eo" "PM_EMBED_OK"
+t_eq "RB-required: ... state.since is null; judged_seen is the seen of the pack the model read" "$(S '(d["since"], d["judged_seen"]["commits"], d["judged_seen"]["commits_total"])')" "(None, 1, 1)"
+t_eq "RB-required: ... the first map is not 'ok': attention was never assessed" "$(S '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['attention not assessed'])"
+
+mkproj rb1 || true
+GB=$(gen); AB=$(S 'd["judged_at"]')
+bump; begin
+t_eq "RB-required: an update's pack carries the baseline: the judged generation, its assessment time, counts, hours" "$(get "$STAGE/pack.json" '(d["since"]["generation"]=="'"$GB"'", d["since"]["assessed_at"]=="'"$AB"'", d["since"]["commits"], d["since"]["dirty"], d["since"]["hours"])')" "(True, True, 0, 1, 0)"
+rej "RB-required: an update without since is rejected" 'del J["since"]' "since is required"
+rej "RB-required: since:null on an update is rejected" 'J["since"]=None' "since is required"
+rej "RB-required: unknown key inside since" 'J["since"]["extra"]=1' "since has unknown keys: extra"
+rej "RB-required: unknown key inside a change" 'J["since"]["changes"]=[{"text":"a","state":"uncommitted","x":1}]' "since.changes[1] has unknown keys: x"
+rej "RB-required: more than 3 changes" 'J["since"]["changes"]=[{"text":"c%d"%i,"state":"uncommitted"} for i in range(4)]' "since.changes has 4 entries, allowed 0..3"
+rej "RB-required: duplicate change texts (case and spacing ignored)" 'J["since"]["changes"]=[{"text":"Same text","state":"uncommitted"},{"text":"same  TEXT","state":"uncommitted"}]' "duplicates another change"
+rej "RB-required: a change text over 120 bytes" 'J["since"]["changes"]=[{"text":"x"*121,"state":"uncommitted"}]' "since.changes[1] text must be 1..120 bytes"
+rej "RB-required: there is no 'checked' state" 'J["since"]["changes"]=[{"text":"Works","state":"checked"}]' "since.changes[1] state must be one of landed|uncommitted"
+rej "RB-required: attention text over 120 bytes" 'J["since"]["attention"]["text"]="x"*121' "since.attention.text must be 1..120 bytes"
+rej "RB-required: attention why over 120 bytes" 'J["since"]["attention"]["why"]="x"*121' "since.attention.why must be 1..120 bytes"
+rej "RB-required: unknown attention kind" 'J["since"]["attention"]["kind"]="maybe"' "since.attention.kind must be one of decision|continue|waiting|unchecked"
+rej "RB-required: more than 3 not_checked entries" 'J["since"]["not_checked"]=["a","b","c","d"]' "since.not_checked has 4 entries, allowed 0..3"
+rej "RB-required: a not_checked entry over 80 bytes" 'J["since"]["not_checked"]=["x"*81]' "since.not_checked[1] must be 1..80 bytes"
+rej "RB-required: a secret-looking token inside since is refused" 'J["since"]["changes"]=[{"text":"key AKIAIOSFODNN7EXAMPLE added","state":"uncommitted"}]' "looks like it contains a secret"
+rej "RB-required: attention id on a kind that is not decision" 'J["since"]["attention"]["id"]="D-001"' "since.attention.id must be absent unless kind is decision"
+pub 'J["since"]["not_checked"]=["Nothing here shows the full-model check passes"]'
+t_pre "RB-required: a valid since publishes" "$eo" "PM_EMBED_OK"
+t_eq "RB-required: ... state.since carries the script counts, the model block and the listed count" "$(S '(sorted(d["since"]), d["since"]["commits"], d["since"]["dirty"], d["since"]["listed"], d["since"]["not_checked"])')" "(['attention', 'changes', 'commits', 'dirty', 'from', 'hours', 'listed', 'not_checked'], 0, 1, 0, ['Nothing here shows the full-model check passes'])"
+
+# ---- RB-landed-ref: landed needs a commit that resolves; uncommitted needs a file ref or none
+bump; begin
+SHA7=$(git -C "$R" rev-parse --short=7 HEAD)
+rej "RB-landed-ref: landed without a ref" 'J["since"]["changes"]=[{"text":"Import landed","state":"landed"}]' "since.changes[1] is landed but has no ref"
+rej "RB-landed-ref: landed with a null ref" 'J["since"]["changes"]=[{"text":"Import landed","state":"landed","ref":None}]' "is landed but has no ref"
+rej "RB-landed-ref: landed with a file ref in a project that has git" 'J["since"]["changes"]=[{"text":"Import landed","state":"landed","ref":"file:PLAN.md"}]' "is landed: its ref must be commit:<sha7+>, not file:PLAN.md"
+rej "RB-landed-ref: landed with a commit that does not exist" 'J["since"]["changes"]=[{"text":"Import landed","state":"landed","ref":"commit:0123456"}]' "commit 0123456 not found in any known repository"
+rej "RB-landed-ref: landed with a branch name" 'J["since"]["changes"]=[{"text":"Import landed","state":"landed","ref":"commit:main"}]' "commit ref must be 7-40 hex characters"
+rej "RB-landed-ref: uncommitted with a commit ref" 'J["since"]["changes"]=[{"text":"Plan edits","state":"uncommitted","ref":"commit:'"$SHA7"'"}]' "is uncommitted: its ref must be file:<rel>[:line] or null"
+rej "RB-landed-ref: uncommitted with a file that does not exist" 'J["since"]["changes"]=[{"text":"Plan edits","state":"uncommitted","ref":"file:nope.md"}]' "since.changes[1] ref: file ref nope.md is not an existing regular file"
+rej "RB-landed-ref: uncommitted with a ref outside the project" 'J["since"]["changes"]=[{"text":"Plan edits","state":"uncommitted","ref":"file:../x"}]' "must be a relative path inside the project"
+pub 'J["since"]["changes"]=[{"text":"Import landed; nothing here shows it works","state":"landed","ref":"commit:'"$SHA7"'"},{"text":"Plan edits are not committed yet","state":"uncommitted","ref":"file:PLAN.md"},{"text":"Scratch notes added","state":"uncommitted"}]'
+t_pre "RB-landed-ref: a landed commit, an uncommitted file and a bare uncommitted change publish" "$eo" "PM_EMBED_OK"
+t_eq "RB-landed-ref: ... all three are stored verbatim, most consequential first" "$(S '[(c["state"], c.get("ref")) for c in d["since"]["changes"]]')" "[('landed', 'commit:$SHA7'), ('uncommitted', 'file:PLAN.md'), ('uncommitted', None)]"
+t_has "RB-landed-ref: the brief says 'landed, not checked' and never 'checked' alone" "$(cat "$PM/brief.txt")" "- Import landed; nothing here shows it works · landed, not checked"
+t_has "RB-landed-ref: ... and 'uncommitted' for the working-tree work" "$(cat "$PM/brief.txt")" "- Plan edits are not committed yet · uncommitted"
+# a project without git: landed may point at a file (that is all the evidence there is)
+rm -rf "$T/rbng"; mkdir -p "$T/rbng"; R=$(cd "$T/rbng" && pwd -P); PM="$R/.project-map"; seq 1 300 > "$R/PLAN.md"; seq 1 200 > "$R/REVIEW-LOG.md"; echo r > "$R/README.md"
+begin; pub '' full
+t_pre "RB-landed-ref: a project without git maps" "$eo" "PM_EMBED_OK"
+echo more >> "$R/PLAN.md"; begin
+rej "RB-landed-ref: without git a commit ref cannot resolve" 'J["since"]["changes"]=[{"text":"Plan landed","state":"landed","ref":"commit:0123456"}]' "not found in any known repository"
+rej "RB-landed-ref: without git a landed file ref must still be a real file" 'J["since"]["changes"]=[{"text":"Plan landed","state":"landed","ref":"file:nope.md"}]' "since.changes[1] ref: file ref nope.md is not an existing regular file"
+pub 'J["since"]["changes"]=[{"text":"Plan landed","state":"landed","ref":"file:PLAN.md"}]'
+t_pre "RB-landed-ref: without git a landed file ref publishes" "$eo" "PM_EMBED_OK"
+
+# ---- RB-attention-decision: a ready open decision is always the primary attention
+mkproj rb2 "$(ovraise "$RW_TP,$RW_SY" "$RB_RDY2")" || true
+t_eq "RB-attention: setup: D-001 is not ready, D-002 is open and ready" "$(S '[(x["id"], x["status"], x["ready"]) for x in d["decisions"]]')" "[('D-001', 'open', False), ('D-002', 'open', True)]"
+bump; begin
+rej "RB-attention: an open ready decision + continue is rejected" 'J["since"]["attention"]={"kind":"continue","text":"Work goes on","why":"Nothing blocks it"}' "since.attention.kind must be decision (id D-002): D-002 open and ready"
+rej "RB-attention: ... waiting is rejected too" 'J["since"]["attention"]={"kind":"waiting","text":"Waiting for CI","why":"CI is slow"}' "since.attention.kind must be decision (id D-002)"
+rej "RB-attention: ... and unchecked" 'J["since"]["attention"]={"kind":"unchecked","text":"Not sure","why":"No data"}' "since.attention.kind must be decision (id D-002)"
+rej "RB-attention: kind decision needs an id" 'J["since"]["attention"]={"kind":"decision","text":"Decide","why":"It blocks"}' "since.attention.id is required when kind is decision"
+rej "RB-attention: an id that is open but not ready (ready:false) is not eligible" 'J["since"]["attention"]={"kind":"decision","id":"D-001","text":"Decide","why":"It blocks"}' "since.attention.id D-001 is not an open decision that needs the owner (open and ready: D-002)"
+rej "RB-attention: an id that does not exist is not eligible" 'J["since"]["attention"]={"kind":"decision","id":"D-009","text":"Decide","why":"It blocks"}' "since.attention.id D-009 is not an open decision"
+rej "RB-attention: a malformed id" 'J["since"]["attention"]={"kind":"decision","id":"first","text":"Decide","why":"It blocks"}' "since.attention.id is required when kind is decision: a decision id (D-nnn)"
+pub "$RB_RDY2"
+t_pre "RB-attention: the open ready decision as the attention publishes" "$eo" "PM_EMBED_OK"
+t_eq "RB-attention: ... kept as judged (D-002 is still open and ready: no script replacement)" "$(S '(d["since"]["attention"]["kind"], d["since"]["attention"]["id"], "by" in d["since"]["attention"], "attention_judged" in d["since"])')" "('decision', 'D-002', False, False)"
+t_has "RB-attention: ... the brief shows the D line" "$(cat "$PM/brief.txt")" "D-002 needs you:"
+t_not "RB-attention: ... and no separate attention line (the D line already says it)" "$(cat "$PM/brief.txt")" "attention:"
+# ready:false does not force; a decision closed by overtaken in the same judgement does not force
+mkproj rb3 || true
+upd ''
+t_pre "RB-attention: with only ready:false decisions, continue is accepted" "$eo" "PM_EMBED_OK"
+t_eq "RB-attention: ... and stays continue" "$(S 'd["since"]["attention"]["kind"]')" "continue"
+mkproj rb4 "$(ovraise "$RW_TP,$RW_SY" "$RB_RDY2")" || true
+ovpush rb4; bump; begin
+rej "RB-attention: D-002 is open and ready and not closed here: continue rejected" 'J["since"]["attention"]={"kind":"continue","text":"Work goes on","why":"Nothing blocks it"}' "since.attention.kind must be decision (id D-002)"
+pub "$RB_CLOSE"
+t_pre "RB-attention: a decision closed by overtaken in the same judgement does not force (continue publishes)" "$eo" "PM_EMBED_OK"
+t_eq "RB-attention: ... D-002 overtaken, attention continue kept" "$(S '([x["status"] for x in d["decisions"] if x["id"]=="D-002"], d["since"]["attention"]["kind"], "attention_judged" in d["since"])')" "(['overtaken'], 'continue', False)"
+# a decision raised in this judgement (ready) forces it as well
+mkproj rb5 || true
+bump; begin
+rej "RB-attention: a decision raised ready in this judgement forces the attention" 'J["decisions"].append({"id":"D-003","q":"Third question?","options":[{"id":"A","label":"Yes"},{"id":"B","label":"No"}],"recommended":"A","default":"hold","hard_rule":None,"deadline":None,"ready":True}); J["since"]["attention"]={"kind":"continue","text":"Work goes on","why":"Nothing blocks it"}' "since.attention.kind must be decision (id D-003)"
+pub "$RB_D3"
+t_eq "RB-attention: ... and publishes with that decision as the attention" "$(S '(d["since"]["attention"]["kind"], d["since"]["attention"]["id"])')" "('decision', 'D-003')"
+
+# ---- RB-seen: what the model saw is measured on the pack it read
+mkproj rbs || true
+i=0; while [ $i -lt 60 ]; do git -C "$R" commit -q --allow-empty -m "change $i: a long enough subject so the pack has some weight to it"; i=$((i+1)); done
+begin
+t_eq "RB-seen: 60 commits since the assessment: commits_total 60, since.commits 60" "$(get "$STAGE/pack.json" '(d["seen"]["commits_total"], d["since"]["commits"])')" "(60, 60)"
+t_eq "RB-seen: ... the retained commits are at most 40 and equal the items the pack lists" "$(get "$STAGE/pack.json" 'd["seen"]["commits"] == sum(len(x["items"]) for x in d["commits"]["days"]) and 0 < d["seen"]["commits"] <= 40')" "True"
+t_true "RB-seen: ... the pack with its seen record is still <= 8192 bytes" "[ \$(wc -c < $STAGE/pack.json) -le 8192 ]"
+SEEN0=$(get "$STAGE/pack.json" 'json.dumps(d["seen"], sort_keys=True)')
+pub ''
+t_pre "RB-seen: the judgement publishes" "$eo" "PM_EMBED_OK"
+t_eq "RB-seen: state.judged_seen is the seen of STAGE/pack.json" "$(S 'json.dumps(d["judged_seen"], sort_keys=True)')" "$SEEN0"
+t_eq "RB-seen: since.listed equals the retained commit count" "$(S 'd["since"]["listed"]')" "$(get "$STAGE/pack.json" 'd["seen"]["commits"]')"
+t_has "RB-seen: assurance says how many commits the model saw" "$(S 'd["assurance"]["why"]')" "of 60 commits shown to the model"
+t_eq "RB-seen: ... and the assessment is not ok" "$(S 'd["assurance"]["ok"]')" "False"
+t_has "RB-seen: brief line 7 carries '<listed> of 60 shown'" "$(grep '^since ' "$PM/brief.txt")" "of 60 shown"
+t_has "RB-seen: brief line 2 carries the qualifier (nothing needs the owner, but the model saw part of the work)" "$(sed -n 2p "$PM/brief.txt")" "· current · $(get "$STAGE/pack.json" 'd["seen"]["commits"]') of 60 commits shown to the model"
+if [ $HAVE_NODE = 1 ]; then
+  rbpage
+  t_eq "RB-seen: the page says 'N of 60 shown to the model'" "$(pj '[x for x in d["since"] if " of 60 shown to the model" in x]')" "['60 commits · 0 uncommitted files · $(get "$STAGE/pack.json" 'd["seen"]["commits"]') of 60 shown to the model']"
+  t_eq "RB-seen: ... and the pill is the incomplete-assessment wording, not the denial" "$(pj 'd["pill"]')" "No decision identified in the checked information"
+fi
+# a publication that goes through the late-answer path still keeps the seen of the pack the model read
+mkproj rbs2 "$(ovraise "$RW_TP,$RW_SY" "$RB_RDY2")" || true
+ovpush rbs2; bump; begin
+lib mut "$STAGE/pack.json" 'd["seen"]["commits"]=7; d["seen"]["commits_total"]=9'
+jud "$INVN" update "$RB_CLOSE"
+printf '{"id":"D-002","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+eo=$(embed "$INVN")
+t_has "RB-seen: a late answer wins (setup)" "$eo" "PM_EMBED_NOTE owner answer for D-002"
+t_eq "RB-seen: ... judged_seen is still the staged file's seen, not a rebuilt pack's" "$(S '(d["judged_seen"]["commits"], d["judged_seen"]["commits_total"], d["since"]["listed"])')" "(7, 9, 7)"
+t_eq "RB-seen: ... while the generation's own pack.json is the rebuilt one" "$(get "$PM/current/pack.json" '(d["seen"]["commits"], d["seen"]["commits_total"])')" "(0, 0)"
+# a pack without a (valid) seen record: unknown coverage, never a guess
+mkproj rbs3 || true
+bump; begin
+lib mut "$STAGE/pack.json" 'del d["seen"]'
+pub ''
+t_eq "RB-seen: a staged pack without seen -> judged_seen null, assurance says pack coverage unknown" "$(S '(d["judged_seen"], d["assurance"]["why"])')" "(None, ['pack coverage unknown'])"
+bump; begin
+lib mut "$STAGE/pack.json" 'd["seen"]["commits"]="many"'
+pub ''
+t_eq "RB-seen: ... a malformed seen is treated the same way" "$(S 'd["judged_seen"]')" "None"
+bump; begin
+lib mut "$STAGE/pack.json" 'd["generation"]="inv-deadbeef"'
+pub ''
+t_eq "RB-seen: ... and so is a pack stamped for another invocation" "$(S 'd["judged_seen"]')" "None"
+
+# seen is computed on the FINAL pack object and counted in the size check (units on build_pack)
+cat > "$T/rb_unit1.py" <<'PYEOF'
+import copy, json, os, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_common as C, pm_collect as K
+snap = json.load(open(sys.argv[2]))
+snap["generation"] = "inv-x"
+out = []
+def sz(p): return len(C.dumps(p).encode())
+# 1. every size the pending-answer count can produce stays inside the cap WITH seen (seen is never added after the last check)
+ok, seen_in_every, edge = True, True, 0
+for n in range(0, 140, 3):
+    s = copy.deepcopy(snap)
+    s["answers"]["pending"] = [{"id": "D-001", "answer": "A", "at": None, "by": "owner", "note": "n" * 100, "line": i} for i in range(n)]
+    s["answers"]["total"] = n
+    try:
+        p = K.build_pack(s, "inv-x")
+    except K.PackOverflow:
+        continue
+    ok = ok and sz(p) <= 8192
+    seen_in_every = seen_in_every and K.valid_seen(p.get("seen"))
+    edge += 1 if p["trimmed"]["answers"] and sz(p) > 8192 - 400 else 0
+out += [ok, seen_in_every, edge > 0]   # the sweep reaches packs within 400 bytes of the cap that had to drop answers
+# 2. a pack too big for any early step: every omission field is measured on the FINAL pack
+s = copy.deepcopy(snap)
+s["status"]["dirty"] = 134
+s["dirty_paths"] = ["f%d.txt" % i for i in range(20)]
+s["commits"] = {"count": 500, "listed": 40, "flagged": 0, "days": [{"day": "2026-10-10", "n": 40, "items": [{"r": ".", "h": "%07x" % i, "s": "subject %d" % i} for i in range(40)]}]}
+s["decisions"] = [{"id": "D-00%d" % i, "status": "open", "q": "q" * 300, "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b" * 90}], "default": "hold"} for i in range(1, 4)]
+s["answers"]["pending"] = [{"id": "D-001", "answer": "A", "at": None, "by": "owner", "note": "n" * 5000, "line": i} for i in range(1, 40)]
+s["ledger"] = {"path": "/x/l.md", "name": "l", "goal": "g" * 900, "now": "n", "next": "x", "blockers": "b", "hash": "h"}
+s["repos"] = [dict(copy.deepcopy(s["repos"][0]), path="r%d" % i) for i in range(11)]
+for r in s["repos"]:
+    r["pad"] = "p" * 600   # nothing trims this: the repos list itself has to be cut
+p = K.build_pack(s, "inv-x")
+se = p["seen"]
+out.append([se["commits_total"] == 500, se["commits"] == sum(len(x["items"]) for x in p["commits"]["days"]) < 40, se["dirty_total"] == 134, se["dirty"] == len(p["dirty_paths"]) <= 20, se["decisions_cut"] >= 1,
+            se["answers_dropped"] == 39, se["ledger_cut"] is True, se["repos_cut"] == 11 - len(p["repos"]) > 0, sz(p) <= 8192])
+# 3. watch_moved against the judged key; watch_moved_cut counts what ANY step removed (the whole-list drop included)
+s = copy.deepcopy(snap)
+paths = ["w/%03d/%s.md" % (i, "z" * 150) for i in range(40)]
+s["watch"] = [{"path": q, "kind": "file", "hash": "h%d" % i * 8, "n": 1} for i, q in enumerate(paths)]
+s["key"]["watch_hashes"] = {q: "a%d" % i for i, q in enumerate(paths)}
+s["prev_key"] = dict(s["key"], watch_hashes=dict(s["key"]["watch_hashes"]))
+s["prev_key"]["watch_hashes"][paths[3]] = "old"           # moved
+s["prev_key"]["watch_hashes"][paths[7]] = "partial"      # a partial hash is not a move
+s["prev_key"]["watch_hashes"].pop(paths[9])               # a path the judged key did not have is not a move
+s["decisions"] = [{"id": "D-00%d" % i, "status": "open", "q": "q" * 140, "options": [{"id": "A", "label": "a" * 60}, {"id": "B", "label": "b" * 60}], "default": "hold"} for i in range(1, 7)]
+s["ledger"] = {"path": "/x/l.md", "name": "l", "goal": "g" * 200, "now": "n" * 200, "next": "x" * 200, "blockers": "b" * 200, "hash": "h"}
+p = K.build_pack(s, "inv-x")
+out.append((p["seen"]["watch_moved"], p["watch"], p["seen"]["watch_moved_cut"], sz(p) <= 8192))
+# 4. a pack where the watch list survives lists the moved path: nothing cut
+s2 = copy.deepcopy(snap)
+s2["watch"] = [{"path": "README.md", "kind": "file", "hash": "h", "n": 1}]
+s2["key"]["watch_hashes"] = {"README.md": "new"}
+s2["prev_key"] = dict(s2["key"], watch_hashes={"README.md": "old"})
+p2 = K.build_pack(s2, "inv-x")
+out.append((p2["seen"]["watch_moved"], p2["seen"]["watch_moved_cut"]))
+# 5. no judged key (first map): nothing moved
+s3 = copy.deepcopy(snap); s3["prev_key"] = None
+out.append(K.build_pack(s3, "inv-x")["seen"]["watch_moved"])
+print(json.dumps(out))
+PYEOF
+mkproj rbu || true; bump; begin
+t_eq "RB-seen-units: the cap holds with seen counted; every omission field is measured on the final pack; watch moves and cuts" "$(python3 -I "$T/rb_unit1.py" "$HOOKS" "$STAGE/snapshot.json")" '[true, true, true, [true, true, true, true, true, true, true, true, true], [1, [], 1, true], [1, 0], 0]'
+cat > "$T/rb_unit2.py" <<'PYEOF'
+import json, os, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_validate as V, pm_render as R
+S = json.load(open(sys.argv[2]))
+out = []
+# the omitted-work phrases are short and the assurance carries them; every field alone flips ok
+base = V.assurance(S)
+out.append(base["ok"])
+for k, v in (("commits", 12), ("dirty", 3), ("decisions_cut", 2), ("answers_dropped", 1), ("ledger_cut", True), ("repos_cut", 2), ("watch_moved_cut", 1)):
+    T = json.loads(json.dumps(S))
+    T["judged_seen"].update(commits_total=30, dirty_total=9)
+    T["judged_seen"][k] = v
+    if k != "commits": T["judged_seen"]["commits"] = 30
+    if k != "dirty": T["judged_seen"]["dirty"] = 9
+    a = V.assurance(T)
+    out.append((k, a["ok"], a["why"][0], all(len(w.encode()) <= 40 for w in a["why"])))
+print(json.dumps(out))
+PYEOF
+upd ''
+t_eq "RB-seen-units: each field of seen alone makes the assurance not ok, with a reason of at most 40 bytes" "$(python3 -I "$T/rb_unit2.py" "$HOOKS" "$PM/state.json")" '[true, ["commits", false, "12 of 30 commits shown to the model", true], ["dirty", false, "3 of 9 changed files shown", true], ["decisions_cut", false, "2 decisions cut in the pack", true], ["answers_dropped", false, "1 answers left out of the pack", true], ["ledger_cut", false, "ledger cut in the pack", true], ["repos_cut", false, "2 repos left out of the pack", true], ["watch_moved_cut", false, "1 changed watch files not shown", true]]'
+
+# ---- RB-assurance: ONE predicate; each clause flips ok; the three-way wording in the page and the brief
+mkproj rba || true
+upd ''
+ax ''
+t_eq "RB-assurance: a complete judged update is ok: case b, 'Nothing needs you'" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(True, [], 'b', 'Nothing needs you')"
+t_eq "RB-assurance: ... and the stored state agrees with the function" "$(S '(d["assurance"]["ok"], d["assurance"]["why"])')" "(True, [])"
+ax 'd["decisions"][0]["ready"]=True'
+t_eq "RB-assurance: a ready open decision -> not ok, case a, 'Needs you'" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(False, ['decision open'], 'a', 'Needs you')"
+ax 'd["decisions"][0]["ready"]=False'
+t_eq "RB-assurance: ready:false does not count as a decision open" "$(axq 'd["assurance"]["ok"]')" "True"
+ax 'd["stale"]={"judged_at":"x","commits_since":2,"why":"2 new commits"}'
+t_eq "RB-assurance: stale -> not ok: case c, the reason names the stale why" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(False, ['assessment behind: 2 new commits'], 'c', 'No decision identified in the checked information')"
+ax 'd["coverage"]["coverage"]="partial"'
+t_eq "RB-assurance: partial coverage -> not ok" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['coverage partial'])"
+ax 'd["repos"][0]["release"].setdefault("key", {})["unverified"]=True'
+t_eq "RB-assurance: an unverified release entry -> not ok" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['tags unverified'])"
+ax 'd["repos"][0]["release"].setdefault("key", {})["partial"]=True'
+t_eq "RB-assurance: a partial release entry -> not ok" "$(axq 'd["assurance"]["why"]')" "['tags unverified']"
+ax 'd["status"]["git_error"]="boom"'
+t_eq "RB-assurance: a git error -> not ok" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['git error'])"
+ax 'd["since"]["attention"]["kind"]="waiting"'
+t_eq "RB-assurance: attention waiting -> not ok" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['attention: waiting'])"
+ax 'd["since"]["attention"]["kind"]="unchecked"'
+t_eq "RB-assurance: attention unchecked -> not ok" "$(axq 'd["assurance"]["why"]')" "['attention: unchecked']"
+ax 'd["since"]=None'
+t_eq "RB-assurance: no attention block at all -> not ok (never assessed)" "$(axq 'd["assurance"]["why"]')" "['attention not assessed']"
+ax 'd["judged_seen"]["commits_total"]=30; d["judged_seen"]["commits"]=12'
+t_eq "RB-assurance: 12 of 30 commits shown -> not ok, with the number" "$(axq 'd["assurance"]["why"]')" "['12 of 30 commits shown to the model']"
+ax 'd["judged_seen"]=None'
+t_eq "RB-assurance: unknown pack coverage -> not ok" "$(axq 'd["assurance"]["why"]')" "['pack coverage unknown']"
+ax 'del d["since"]; del d["judged_seen"]; del d["assurance"]'
+t_eq "RB-assurance: a state from before 3.4 (no since, seen or assurance) is assessed, never assumed fine" "$(axq 'd["assurance"]["why"]')" "['attention not assessed', 'pack coverage unknown']"
+ax 'd["decisions"][0]["ready"]=True; d["stale"]={"judged_at":"x","commits_since":2,"why":"2 new commits"}'
+t_eq "RB-assurance: a ready open decision + stale -> 'Needs you', never the denial" "$(axq '(d["case"], d["text"], d["assurance"]["why"][:2])')" "('a', 'Needs you', ['decision open', 'assessment behind: 2 new commits'])"
+# the same wording in brief line 2: current / behind, with and without the qualifier (case c only)
+t_eq "RB-brief-2: ok and current: no qualifier" "$(bf '' | sed -n 2p | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{5}/T/g')" "as of T · assessed T · current"
+t_eq "RB-brief-2: case c and current: the first reason qualifies it" "$(bf 'd["coverage"]["coverage"]="partial"; d["assurance"]=None' | sed -n 2p | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{5}/T/g')" "as of T · assessed T · current · coverage partial"
+t_eq "RB-brief-2: ... a reason is cut to 40 bytes with a marker, never mid-line" "$(bf 'd["assurance"]={"ok":False,"why":["x"*100]}' | sed -n 2p | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{5}/T/g')" "as of T · assessed T · current · $(printf 'x%.0s' $(seq 1 37))..."
+t_eq "RB-brief-2: behind: the stale reason, once (the qualifier does not repeat it)" "$(bf 'd["stale"]={"judged_at":"x","commits_since":2,"why":"2 new commits"}; d["assurance"]=None' | sed -n 2p | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{5}/T/g')" "as of T · assessed T · behind: 2 new commits"
+t_eq "RB-brief-2: behind and another reason: 'behind: ... · <that reason>'" "$(bf 'd["stale"]={"judged_at":"x","commits_since":2,"why":"2 new commits"}; d["coverage"]["coverage"]="partial"; d["assurance"]=None' | sed -n 2p | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{5}/T/g')" "as of T · assessed T · behind: 2 new commits · coverage partial"
+t_eq "RB-brief-2: the stale reason is cut to 60 bytes" "$(bf 'd["stale"]={"judged_at":"x","commits_since":2,"why":"w"*100}; d["assurance"]=None' | sed -n 2p | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{5}/T/g' | sed -E 's/w{57}\.\.\./CUT/')" "as of T · assessed T · behind: CUT"
+t_not "RB-brief-2: a ready open decision + stale: case a, no denial and no qualifier" "$(bf 'd["decisions"][0]["ready"]=True; d["stale"]={"judged_at":"x","commits_since":2,"why":"2 new commits"}; d["assurance"]=None' | sed -n 2p)" "· decision open"
+# the page: three-way pill and tile, the reasons, the stale line (the real page JavaScript)
+if [ $HAVE_NODE = 1 ]; then
+  rbpage
+  t_eq "RB-assurance page: ok -> 'Nothing needs you', tile 'Nothing'" "$(pj '(d["error"], d["pill"], d["count"], d["note"])')" "(None, 'Nothing needs you', 'Nothing', '')"
+  rbpage '{"decisions":[{"id":"D-001","status":"open","q":"Q?","options":[{"id":"A","label":"a"}],"default":"hold","ready":true}],"stale":{"judged_at":"x","commits_since":1,"why":"1 new commits"},"assurance":{"ok":false,"why":["decision open","assessment behind: 1 new commits"]}}'
+  t_eq "RB-assurance page: a ready decision + stale -> 'Needs you', tile 1 decision, stale line kept, never the denial" "$(pj '(d["pill"], d["count"], d["note"], d["stale"])')" "('Needs you', '1', 'decision', ['Assessment may be out of date · 1 new commits'])"
+  rbpage '{"assurance":{"ok":false,"why":["coverage partial","12 of 30 commits shown to the model","attention: waiting"]}}'
+  t_eq "RB-assurance page: none open + not ok -> the incomplete wording, tile lists the first two reasons" "$(pj '(d["pill"], d["count"], d["note"])')" "('No decision identified in the checked information', 'None found', 'coverage partial · 12 of 30 commits shown to the model')"
+  t_has "RB-assurance page: ... and the snapshot lists every reason" "$(pj '[r for r in d["snapshot"] if r[0]=="Assurance"]')" "coverage partial · 12 of 30 commits shown to the model · attention: waiting"
+  rbpage '{"assurance":null,"stale":{"judged_at":"x","commits_since":1,"why":"1 new commits"}}'
+  t_eq "RB-assurance page: a state without assurance (before 3.4) keeps the earlier pill" "$(pj 'd["pill"]')" "Assessment may be out of date"
+fi
+
+# ---- RB-baseline: the baseline is the previous assessment; a mechanical refresh keeps it
+mkproj rbb || true
+G0=$(gen); JA0=$(S 'd["judged_at"]')
+upd ''
+t_eq "RB-baseline: since.from is the previous generation and its assessment time" "$(S '(d["since"]["from"]["generation"], d["since"]["from"]["assessed_at"])')" "$(printf "('%s', '%s')" "$G0" "$JA0")"
+JA1=$(S 'd["judged_at"]'); G1=$(gen)
+upd ''
+t_eq "RB-baseline: after a second judgement the baseline moves to the first one's assessment" "$(S '(d["since"]["from"]["generation"], d["since"]["from"]["assessed_at"])')" "$(printf "('%s', '%s')" "$G1" "$JA1")"
+git -C "$R" add -A; git -C "$R" commit -qm settle; begin; pub ''
+t_eq "RB-baseline: a judgement on a clean tree: 1 commit, 0 uncommitted files" "$(S '(d["since"]["commits"], d["since"]["dirty"])')" "(1, 0)"
+SB=$(S 'json.dumps([d["since"], d["judged_seen"]], sort_keys=True)'); JA2=$(S 'd["judged_at"]')
+echo x > "$R/rb-scratch.txt"; out=$(facts)
+t_pre "RB-baseline: a new file: the verdict re-judges" "$out" "NEEDS_JUDGEMENT"
+t_eq "RB-baseline: ... the refresh that flagged the map stale kept since and judged_seen as they were" "$(S 'json.dumps([d["since"], d["judged_seen"]], sort_keys=True)')" "$SB"
+t_eq "RB-baseline: ... and the assurance was recomputed from the new stale record" "$(S '(d["stale"] is not None, d["assurance"]["ok"], d["assurance"]["why"][0].startswith("assessment behind"))')" "(True, False, True)"
+t_true "RB-baseline: ... the brief says 'behind: ...' on line 2" "sed -n 2p $PM/brief.txt | grep -q ' · behind: '"
+rm -f "$R/rb-scratch.txt"; out=$(facts)
+t_pre "RB-baseline: the new file is gone: the stale flag clears without a judgement" "$out" "NEEDS_REFRESH stale cleared"
+t_eq "RB-baseline: ... and the assurance is ok again" "$(S '(d["stale"], d["assurance"]["ok"])')" "(None, True)"
+t_eq "RB-baseline: ... and since is still the judged batch's" "$(S 'json.dumps([d["since"], d["judged_seen"]], sort_keys=True)')" "$SB"
+t_eq "RB-baseline: the refreshes moved the snapshot time but never the assessment time" "$(S '(d["identity"]["snapshot_at"] != "'"$JA2"'", d["judged_at"] == "'"$JA2"'")')" "(True, True)"
+upd ''
+t_eq "RB-baseline: the next judgement's baseline is the previous ASSESSMENT, not the last refresh or visit" "$(S 'd["since"]["from"]["assessed_at"]')" "$JA2"
+# a 3.x (legacy) migration has no previous assessment to compare with
+mkdir -p "$T/rblg"; R=$(cd "$T/rblg" && pwd -P); PM="$R/.project-map"; lib legacy "$R"
+(cd "$R" && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && seq 1 300 > PLAN.md && seq 1 200 > REVIEW-LOG.md && echo r > README.md && git add -A && git commit -qm init)
+begin
+t_eq "RB-baseline: a migration from 3.x has since null (no previous assessment)" "$(get "$STAGE/snapshot.json" 'd["since"]')" "None"
+
+# ---- RB-brief-max: every capped field at its maximum, six decisions, a 200+ byte folder
+rbmax() { # the judgement CODE for the maximal state (name, label, headline, next step, six ready decisions)
+  printf '%s' 'J["project"]["name"]="N"*40; J["headline"]["text"]="H"*180; J["headline"]["tone"]="blocked"
+P["phases"][1]["label"]="L"*60
+J["parts"]=[{"id":"engine","label":"Engine","status":"unknown"}]; J["loops"]=[]; J["risks"]=[]; J["eta"]=None
+J["next_step"]={"title":"T"*80,"why":"w","actor":"external","unblocks":[]}
+J["decisions"]=[{"id":"D-%03d"%i,"q":"Q%d"%i+"q"*138,"options":[{"id":"A","label":"a"},{"id":"B","label":"b"}],"recommended":"A","default":"hold","hard_rule":None,"deadline":"2030-01-0%dT00:00:00+00:00"%i,"ready":True} for i in range(1,7)]'
+}
+RBX="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+mkproj "$RBX/$RBX/rbmax" "$(rbmax)" || true
+t_true "RB-brief-max: setup: the project folder is over 200 bytes" "[ \${#R} -gt 200 ]"
+t_pre "RB-brief-max: the maximal first map publishes" "$eo" "PM_EMBED_OK"
+t_true "RB-brief-max: brief <= 1000 bytes including the newline" "[ \$(wc -c < $PM/brief.txt) -le 1000 ]"
+t_eq "RB-brief-max: line 1 folder is bounded: an ellipsis and the last components, at most 60 bytes" "$(python3 -c 'import sys;l=open(sys.argv[1],encoding="utf-8").readline().split(" \u00b7 ");print(len(l[1].encode())<=60 and l[1].startswith("\u2026/"))' "$PM/brief.txt")" "True"
+t_true "RB-brief-max: lines 1 to 3, the next step and the trailer are all present" "head -1 $PM/brief.txt | grep -q '^NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN · ' && sed -n 2p $PM/brief.txt | grep -q '^as of ' && sed -n 3p $PM/brief.txt | grep -q '^HHHH' && grep -q '^next: TTT' $PM/brief.txt && [ \"\$(tail -1 $PM/brief.txt)\" = 'generation $(gen)' ]"
+t_true "RB-brief-max: with six ready decisions the lower lines collapse to '+N more decisions'" "grep -q '^+[0-9] more decisions\$' $PM/brief.txt"
+bump; begin
+SHAX=$(git -C "$R" rev-parse --short=7 HEAD)
+MAXSINCE='J["since"]={"changes":[{"text":"A"+"a"*119,"state":"landed","ref":"commit:'"$SHAX"'"},{"text":"B"+"b"*119,"state":"uncommitted","ref":"file:PLAN.md"},{"text":"C"+"c"*119,"state":"uncommitted"}],"attention":{"kind":"decision","id":"D-001","text":"X"*120,"why":"Y"*120},"not_checked":["n"*80,"m"*80,"k"*80]}'
+jud "$INVN" update "$(rbmax); $MAXSINCE"; eo=$(embed "$INVN")
+t_pre "RB-brief-max: the maximal update (3 changes, attention, six decisions) publishes" "$eo" "PM_EMBED_OK"
+t_true "RB-brief-max: ... brief <= 1000 bytes" "[ \$(wc -c < $PM/brief.txt) -le 1000 ]"
+t_true "RB-brief-max: ... line 2, line 3, the next step and the trailer survive every drop" "sed -n 2p $PM/brief.txt | grep -q '^as of ' && sed -n 3p $PM/brief.txt | grep -q '^HHHH' && grep -q '^next: TTT' $PM/brief.txt && [ \"\$(tail -1 $PM/brief.txt)\" = 'generation $(gen)' ]"
+t_true "RB-brief-max: ... every line is whole (no D line is cut mid-line)" "! grep -E '^D-[0-9]+ needs you' $PM/brief.txt | grep -v ')\$'"
+t_true "RB-brief-max: ... the primary decision's D line is shown and its attention line is omitted" "grep -q '^D-001 needs you' $PM/brief.txt && ! grep -q '^attention:' $PM/brief.txt"
+cat > "$T/rb_unit3.py" <<'PYEOF'
+import copy, json, os, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_render as R, pm_common as C
+S = json.load(open(sys.argv[2]))
+# every optional line present: tokens, git, three changes, since, attention (not a decision), overtaken, stale, coverage
+S["identity"].update(name="demo", folder="~/d"); S["focus"]["label"] = "Phase"; S["headline"]["tone"] = "ok"; S["assurance"] = None
+S["usage"] = {"totals": {"all": 1.5e9, "claude": 1.0e9, "codex": 0.5e9}}
+S["repos"][0]["release"] = {"line": "tagged v3.2.3 at HEAD · in sync with origin/main (local tracking state)"}
+S["decisions"] = [d for d in S["decisions"] if d["status"] not in ("open", "overdue")]
+S["decisions"].append({"id": "D-009", "status": "overtaken", "q": "q", "overtaken_why": "Owner did it by hand", "overtaken_ref": "tag:v1"})
+S["stale"] = {"judged_at": "x", "commits_since": 3, "why": "3 new commits"}
+S["coverage"] = {"coverage": "partial", "covered": 3, "total": 9}
+S["since"] = {"from": {"generation": "g", "assessed_at": "2026-10-10T09:00:00+00:00"}, "commits": 7, "listed": 7, "dirty": 2, "hours": 3,
+              "changes": [{"text": "Change %d is about this" % i, "state": "landed" if i == 1 else "uncommitted", "ref": None} for i in (1, 2, 3)],
+              "attention": {"kind": "waiting", "text": "Waiting on the vendor", "why": "Nothing moves without it"}, "not_checked": []}
+def lines(pad):
+    T = copy.deepcopy(S); T["headline"]["text"] = "h" * pad
+    return R.brief(T).splitlines()
+MARK = [("tokens", lambda L: any(x.startswith("tokens") for x in L)), ("git", lambda L: any(x.startswith("git:") for x in L)),
+        ("change3", lambda L: any(x.startswith("- Change 3") for x in L)), ("change2", lambda L: any(x.startswith("- Change 2") for x in L)),
+        ("change1", lambda L: any(x.startswith("- Change 1") for x in L)), ("since", lambda L: any(x.startswith("since ") for x in L)),
+        ("attention", lambda L: any(x.startswith("attention:") for x in L)), ("overtaken", lambda L: any("overtaken by events" in x for x in L)),
+        ("coverage", lambda L: any(x.startswith("coverage partial") for x in L)), ("stale", lambda L: any(x.startswith("stale:") for x in L))]
+gone = {}
+for pad in range(1, 900):
+    L = lines(pad)
+    assert len(("\n".join(L) + "\n").encode()) <= 1000 and L[-1].startswith("generation ") and L[1].startswith("as of ")
+    for name, f in MARK:
+        if name not in gone and not f(L):
+            gone[name] = pad
+order = [n for n, _ in sorted(gone.items(), key=lambda kv: kv[1])]
+full = lines(1)
+print(json.dumps([order, len(gone) == len(MARK), [x for x in full if x.startswith("- ")] == ["- Change 1 is about this · landed, not checked", "- Change 2 is about this · uncommitted", "- Change 3 is about this · uncommitted"],
+                  full.index(next(x for x in full if x.startswith("attention:"))) < full.index(next(x for x in full if x.startswith("next:"))) < full.index(next(x for x in full if x.startswith("since "))) < full.index(next(x for x in full if x.startswith("- Change 1"))) < full.index(next(x for x in full if "overtaken" in x)) < full.index(next(x for x in full if x.startswith("git:"))) < full.index(next(x for x in full if x.startswith("stale:"))) < full.index(next(x for x in full if x.startswith("tokens")))]))
+PYEOF
+t_eq "RB-brief-max: the drop order is exact: tokens, git, change 3, 2, 1, since, attention, overtaken, coverage, stale (and the display order holds)" "$(python3 -I "$T/rb_unit3.py" "$HOOKS" "$PM/state.json")" '[["tokens", "git", "change3", "change2", "change1", "since", "attention", "overtaken", "coverage", "stale"], true, true, true]'
+
+# ---- RB-page: rows and inert text (the real page JavaScript, no browser)
+mkproj rbp || true
+bump; begin
+SHAP=$(git -C "$R" rev-parse --short=7 HEAD)
+pub 'J["since"]["changes"]=[{"text":"<script>alert(1)</script> landed","state":"landed","ref":"commit:'"$SHAP"'"},{"text":"Plan <b>edited</b>","state":"uncommitted","ref":"file:PLAN.md"}]; J["since"]["not_checked"]=["<img src=x onerror=alert(1)>"]'
+t_pre "RB-page: markup-looking text in since publishes" "$eo" "PM_EMBED_OK"
+t_true "RB-page: the template has a #since section between the header and the tiles, and still no innerHTML" "python3 - $PM/index.html <<'PY'
+import sys
+h = open(sys.argv[1], encoding='utf-8').read()
+a, b, c = h.index('</header>'), h.index('id=\"since\"'), h.index('class=\"tiles\"')
+sys.exit(0 if a < b < c and '.innerHTML' not in h else 1)
+PY"
+t_true "RB-page: the since CSS lives in the existing tokens (card, 1px line border, 16px radius) with a mobile rule" "grep -q '.since{background:var(--card);border:1px solid var(--line);border-radius:16px' $PM/index.html && grep -q '.since{padding:16px' $PM/index.html"
+if [ $HAVE_NODE = 1 ]; then
+  rbpage
+  t_eq "RB-page: the page script ran without error and the section is shown" "$(pj '(d["error"], d["sinceHidden"])')" "(None, False)"
+  t_has "RB-page: eyebrow: Since the previous assessment · <date>" "$(pj 'd["since"][0]')" "Since the previous assessment · 20"
+  t_eq "RB-page: the count line is '<N> commits · <M> uncommitted files'" "$(pj 'd["since"][1]')" "0 commits · 1 uncommitted files"
+  t_eq "RB-page: the attention row and both change rows" "$(pj 'd["since"][2:5]')" "['Attention · continue | Work can continue without the owner | Nothing is blocked on you', '<script>alert(1)</script> landed | landed, not checked by the map', 'Plan <b>edited</b> | uncommitted']"
+  t_eq "RB-page: not checked: ..." "$(pj 'd["since"][5]')" "not checked: <img src=x onerror=alert(1)>"
+  t_eq "RB-page: the text from the repository stayed text: no script or iframe element was ever created" "$(pj '(d["scripts"], "img" in d["created"], "script" in d["created"])')" "(0, False, False)"
+  mkproj rbp0 || true
+  rbpage
+  t_eq "RB-page: a first map has no since state: the section stays hidden" "$(pj '(d["sinceHidden"], d["since"])')" "(True, [])"
+fi
+
+# ---- RB-reconcile: the attention is reconciled with the decisions that are open AT PUBLICATION (one code path)
+rbtail() { # NAME: D-002 (ready, with predicates) is closed by events in the judgement, an uncommitted tail is appended after staging
+  mkproj "$1" "$(ovraise "$RW_TP,$RW_SY" "$RB_RDY2")" || true
+  ovpush "$1"; bump; begin
+}
+rbtail rbr1
+printf '{"id":"D-002","answer":"hold","by":"owner"}' > "$PM/answers.jsonl"
+jud "$INVN" update "$RB_CLOSE"
+t_eq "RB-reconcile: setup: the judged attention is continue (D-002 is closed by this judgement)" "$(get "$STAGE/judgement.out.json" 'd["since"]["attention"]["kind"]')" "continue"
+eo=$(embed "$INVN")
+t_has "RB-reconcile: the closure is deferred behind the uncommitted tail" "$eo" "events closure of D-002 deferred"
+t_eq "RB-reconcile: ... D-002 is published open" "$(S '[(x["id"], x["status"]) for x in d["decisions"] if x["id"]=="D-002"]')" "[('D-002', 'open')]"
+t_eq "RB-reconcile: ... so since.attention is the script's decision item" "$(S '(d["since"]["attention"]["kind"], d["since"]["attention"]["id"], d["since"]["attention"]["by"], d["since"]["attention"]["why"])')" "('decision', 'D-002', 'script', 'still open at publication')"
+t_eq "RB-reconcile: ... its text is the decision's question; the model's block is kept as attention_judged" "$(S '(d["since"]["attention"]["text"]==[x["q"] for x in d["decisions"] if x["id"]=="D-002"][0][:120], d["since"]["attention_judged"]["kind"])')" "(True, 'continue')"
+t_has "RB-reconcile: the brief lists D-002 as needing the owner" "$(cat "$PM/brief.txt")" "D-002 needs you:"
+t_not "RB-reconcile: ... and does not claim the work can simply continue" "$(cat "$PM/brief.txt")" "Work can continue"
+t_eq "RB-reconcile: the assurance is not ok: a decision is open" "$(S '(d["assurance"]["ok"], d["assurance"]["why"][0])')" "(False, 'decision open')"
+if [ $HAVE_NODE = 1 ]; then
+  rbpage
+  t_eq "RB-reconcile: the page's attention row is the decision D-002" "$(pj '(d["attention"], d["pill"], d["since"][2].startswith("Attention · decision D-002"))')" "(['decision'], 'Needs you', True)"
+fi
+# two committed late answers answer the primary D-001 (and the closing D-002); D-003 stays open: the attention moves to D-003
+mkproj rbr2 "$(ovraise "$RW_TP,$RW_SY" 'J["decisions"][0]["ready"]=True; '"$RB_RDY2; $RB_D3")" || true
+ovpush rbr2; bump; begin
+jud "$INVN" update 'J["decisions"][0]["ready"]=True; '"$RB_RDY2; $RB_D3; $RB_CLOSE"
+t_eq "RB-reconcile: setup: the judged primary attention is D-001" "$(get "$STAGE/judgement.out.json" '(d["since"]["attention"]["kind"], d["since"]["attention"]["id"])')" "('decision', 'D-001')"
+printf '{"id":"D-002","answer":"hold","by":"owner"}\n{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+eo=$(embed "$INVN")
+t_has "RB-reconcile: the owner's answers arrived during the judgement and won" "$eo" "PM_EMBED_NOTE owner answer for D-002"
+t_eq "RB-reconcile: ... D-001 and D-002 answered, D-003 open" "$(S '[(x["id"], x["status"]) for x in d["decisions"]]')" "[('D-001', 'answered'), ('D-002', 'answered'), ('D-003', 'open')]"
+t_eq "RB-reconcile: ... the attention moved to D-003 (script item), the judged D-001 block is kept" "$(S '(d["since"]["attention"]["id"], d["since"]["attention"]["by"], d["since"]["attention"]["text"], d["since"]["attention_judged"]["id"])')" "('D-003', 'script', 'Third question?', 'D-001')"
+t_has "RB-reconcile: the brief shows D-003 as needing the owner" "$(cat "$PM/brief.txt")" "D-003 needs you:"
+t_not "RB-reconcile: ... and an answered decision is never shown as one that needs the owner" "$(cat "$PM/brief.txt")" "D-001 needs you"
+# the primary answered and nothing left: the unchecked fallback, never an answered id rendered as current
+mkproj rbr3 "$(ovraise "$RW_TP,$RW_SY" 'J["decisions"][0]["ready"]=True; '"$RB_RDY2")" || true
+ovpush rbr3; bump; begin
+jud "$INVN" update 'J["decisions"][0]["ready"]=True; '"$RB_RDY2; $RB_CLOSE"
+printf '{"id":"D-002","answer":"hold","by":"owner"}\n{"id":"D-001","answer":"hold","by":"owner"}\n' >> "$PM/answers.jsonl"
+eo=$(embed "$INVN")
+t_eq "RB-reconcile: both answered, none left: the attention is the unchecked fallback" "$(S '(d["since"]["attention"]["kind"], "id" in d["since"]["attention"], d["since"]["attention"]["text"], d["since"]["attention"]["why"], d["since"]["attention"]["by"], d["since"]["attention_judged"]["id"])')" "('unchecked', False, 'D-001 was answered after the assessment; attention not reassessed', 'pending the next judgement', 'script', 'D-001')"
+t_has "RB-reconcile: ... the brief says so" "$(cat "$PM/brief.txt")" "attention: D-001 was answered after the assessment; attention not reassessed · pending the next judgement"
+t_not "RB-reconcile: ... and no D line for the answered decisions" "$(cat "$PM/brief.txt")" "needs you:"
+t_eq "RB-reconcile: ... the assurance names the unchecked attention" "$(S 'd["assurance"]["why"]')" "['attention: unchecked']"
+if [ $HAVE_NODE = 1 ]; then
+  rbpage
+  t_eq "RB-reconcile: the page shows the unchecked row, never an answered id as current" "$(pj '(d["attention"], d["pill"], d["since"][2])')" "(['unchecked'], 'No decision identified in the checked information', 'Attention · unchecked | D-001 was answered after the assessment; attention not reassessed | pending the next judgement')"
+fi
+# a decision the judgement itself flips to ready is not forcing (the STAGED flag decides) and is picked up at publication
+mkproj rbr5 || true
+upd 'J["decisions"][0]["ready"]=True'
+t_pre "RB-reconcile: a judgement that flips D-001 ready while saying continue publishes" "$eo" "PM_EMBED_OK"
+t_eq "RB-reconcile: ... and D-001 is the script's attention item, the judged continue kept" "$(S '(d["since"]["attention"]["kind"], d["since"]["attention"]["id"], d["since"]["attention"]["by"], d["since"]["attention_judged"]["kind"])')" "('decision', 'D-001', 'script', 'continue')"
+# no replacement when the judged attention still names an open ready decision
+mkproj rbr4 "$(ovraise "$RW_TP,$RW_SY" "$RB_RDY2")" || true
+bump; begin; pub "$RB_RDY2"
+t_eq "RB-reconcile: a judged attention that is still right is kept verbatim (no by, no attention_judged)" "$(S '(d["since"]["attention"]["id"], "by" in d["since"]["attention"], "attention_judged" in d["since"])')" "('D-002', False, False)"
+
+# ---- RB-watch-omitted: cap pressure drops the whole watch list while only watched files moved
+cat > "$T/rb_unit4.py" <<'PYEOF'
+import copy, json, os, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import pm_collect as K, pm_validate as V, pm_render as R
+snap = json.load(open(sys.argv[2])); snap["generation"] = "inv-x"
+S = json.load(open(sys.argv[3]))
+paths = ["w/%03d/%s.md" % (i, "z" * 150) for i in range(40)]
+snap["watch"] = [{"path": q, "kind": "file", "hash": "h%d" % i * 8, "n": 1} for i, q in enumerate(paths)]
+snap["key"]["watch_hashes"] = {q: "a%d" % i for i, q in enumerate(paths)}
+snap["prev_key"] = dict(snap["key"], watch_hashes=dict(snap["key"]["watch_hashes"], **{paths[5]: "old"}))
+snap["status"]["dirty"] = 0; snap["dirty_paths"] = []
+snap["decisions"] = [{"id": "D-00%d" % i, "status": "open", "q": "q" * 140, "options": [{"id": "A", "label": "a" * 60}, {"id": "B", "label": "b" * 60}], "default": "hold", "ready": False} for i in range(1, 7)]
+snap["ledger"] = None   # only watched files moved and only the watch list is lost
+p = K.build_pack(snap, "inv-x")
+seen = p["seen"]
+S["judged_seen"] = dict(seen, commits=seen["commits_total"], dirty=seen["dirty_total"])
+S["decisions"] = [d for d in S["decisions"] if d["status"] not in ("open", "overdue")]
+S["since"]["attention"] = {"kind": "continue", "text": "x", "why": "y"}
+S["stale"] = None; S["coverage"] = {"coverage": "complete", "covered": 1, "total": 1}
+S["assurance"] = V.assurance(S)
+q = R.brief(S).splitlines()[1].split(" \u00b7 ", 2)[2]
+print(json.dumps([p["watch"], seen["watch_moved"], seen["watch_moved_cut"], len(json.dumps(p)) <= 8192, S["assurance"], q.startswith("current"), q.endswith("1 changed watch files not shown")]))
+PYEOF
+mkproj rbw || true; upd ''
+bump; begin
+t_eq "RB-watch-omitted: only a watched file moved, the cap dropped the whole watch list: cut counted, assurance false, qualifier shown" "$(python3 -I "$T/rb_unit4.py" "$HOOKS" "$STAGE/snapshot.json" "$PM/state.json")" '[[], 1, 1, true, {"ok": false, "why": ["1 changed watch files not shown"]}, true, true]'
+
+# ---- RB-pubwatch: a path the judgement adds to `watch` is hashed at publication; an incomplete check is partial coverage
+mkproj rbpw || true; upd ''
+t_eq "RB-pubwatch: the baseline update is complete and certified" "$(S '(d["coverage"]["coverage"], d["assurance"]["ok"])')" "('complete', True)"
+echo new > "$R/docs/added.md"; bump; begin
+cov0=$(get "$STAGE/snapshot.json" '(d["status"]["covered"], d["status"]["total"])')
+jud "$INVN" update 'J["watch"]=J.get("watch",[])+["docs/added.md"]'; eo=$(PM_EMBED_WATCH_DEADLINE=0 embed "$INVN")
+t_pre "RB-pubwatch: publishes" "$eo" "PM_EMBED_OK gen"
+t_eq "RB-pubwatch: the added path's hash is partial in the judged key" "$(S 'd["judged_key"]["watch_hashes"].get("docs/added.md")')" "partial"
+t_eq "RB-pubwatch: published coverage is partial and counts the unchecked file" "$(S '(d["coverage"]["coverage"], d["coverage"]["covered"], d["coverage"]["total"])')" "$(python3 -c "import sys; c,t=eval(sys.argv[1]); print(('partial', c, t+1))" "$cov0")"
+t_eq "RB-pubwatch: the assurance is not ok, wording case c" "$(S '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['coverage partial'])"
+t_eq "RB-pubwatch: brief line 2 carries the coverage qualifier" "$(sed -n 2p "$PM/brief.txt" | sed 's/.* · //')" "coverage partial"
+if [ "$HAVE_NODE" = 1 ]; then rbpage; t_eq "RB-pubwatch: the page pill says no decision identified" "$(pj 'd["pill"]')" "No decision identified in the checked information"; fi
+# an added DIRECTORY whose walk is cut before it finds a file: hash partial with nothing counted (0 of 0); the partial hash
+# alone must make the coverage partial
+upd ''
+t_eq "RB-pubwatch-dir: the baseline is complete again" "$(S '(d["coverage"]["coverage"], d["assurance"]["ok"])')" "('complete', True)"
+mkdir -p "$R/docs/newdir"; echo x > "$R/docs/newdir/a.md"; bump; begin
+cov0=$(get "$STAGE/snapshot.json" '(d["status"]["covered"], d["status"]["total"])')
+jud "$INVN" update 'J["watch"]=J.get("watch",[])+["docs/newdir"]'; eo=$(PM_EMBED_WATCH_DEADLINE=0 embed "$INVN")
+t_pre "RB-pubwatch-dir: publishes" "$eo" "PM_EMBED_OK gen"
+t_eq "RB-pubwatch-dir: the added directory's hash is partial" "$(S 'd["judged_key"]["watch_hashes"].get("docs/newdir")')" "partial"
+t_eq "RB-pubwatch-dir: counts unchanged (0 of 0 added), coverage partial" "$(S '(d["coverage"]["coverage"], d["coverage"]["covered"], d["coverage"]["total"])')" "$(python3 -c "import sys; c,t=eval(sys.argv[1]); print(('partial', c, t))" "$cov0")"
+t_eq "RB-pubwatch-dir: the assurance is not ok" "$(S '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['coverage partial'])"
+t_eq "RB-pubwatch-dir: brief line 2 carries the coverage qualifier" "$(sed -n 2p "$PM/brief.txt" | sed 's/.* · //')" "coverage partial"
+if [ "$HAVE_NODE" = 1 ]; then rbpage; t_eq "RB-pubwatch-dir: the page pill says no decision identified" "$(pj 'd["pill"]')" "No decision identified in the checked information"; fi
+# another added path hashed in time keeps the coverage complete and the counts truthful
+bump; begin
+cov0=$(get "$STAGE/snapshot.json" '(d["status"]["covered"], d["status"]["total"])')
+echo new2 > "$R/docs/added2.md"
+jud "$INVN" update 'J["watch"]=J.get("watch",[])+["docs/added2.md"]'
+eo=$(embed "$INVN")
+t_pre "RB-pubwatch: a timely check publishes" "$eo" "PM_EMBED_OK gen"
+t_eq "RB-pubwatch: a timely check keeps coverage complete and adds its counts" "$(S '(d["coverage"]["coverage"], d["coverage"]["covered"], d["coverage"]["total"])')" "$(python3 -c "import sys; c,t=eval(sys.argv[1]); print(('complete', c+1, t+1))" "$cov0")"
 
 echo; echo "total $((pass+fail)) pass $pass fail $fail"; [ "$fail" = 0 ]

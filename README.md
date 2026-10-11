@@ -11,10 +11,10 @@
 
 <!-- TECH BADGES: flat-square style, unified color 2ecc71 -->
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.3.0-2ecc71?style=flat-square" alt="Version 3.3.0">
+  <img src="https://img.shields.io/badge/Version-3.4.0-2ecc71?style=flat-square" alt="Version 3.4.0">
   <img src="https://img.shields.io/badge/Python-3.9%2B-2ecc71?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Bash-3.2%2B-2ecc71?style=flat-square&logo=gnubash&logoColor=white" alt="Bash">
-  <img src="https://img.shields.io/badge/Tests-2944%20passing-2ecc71?style=flat-square" alt="2944 tests passing">
+  <img src="https://img.shields.io/badge/Tests-3137%20passing-2ecc71?style=flat-square" alt="3137 tests passing">
   <img src="https://img.shields.io/badge/License-MIT-2ecc71?style=flat-square" alt="License MIT">
 </p>
 
@@ -66,7 +66,20 @@ Open the page in your browser, or read a short summary in Claude Code.
 
 The first map costs about half a dollar of Opus. Later refreshes are a few cents or free; the measured update below was about $0.10. These are estimates, not a fixed price.
 
-From then on, every new Claude Code session in a mapped project starts with the short summary already in context (about 300 tokens, no model call). It says how many commits have landed since Claude last assessed the project, so an old assessment is never presented as fresh.
+From then on, every new Claude Code session in a mapped project starts with the short summary already in context (about 300 tokens, no model call). It says what changed since Claude last assessed the project (commits landed, files not yet committed, the few changes that matter, and the one thing that deserves your attention), so an old assessment is never presented as fresh. For example:
+
+```text
+demo-app · ~/code/demo-app · phase 2/3 Full-model check passes · watch
+as of 2026-10-11T09:40 · assessed 2026-10-10T17:05 · current
+Full-model check failed twice on router error bounds; diagnosis running.
+D-001 needs you: Keep the 1e-2 error bar, or relax it? (default hold, by 2026-10-12)
+next: Finish the cycle-2 diagnosis report (claude)
+since 2026-10-10T17:05: 3 commits · 2 uncommitted · 2 changes
+- Import landed; nothing here shows it works · landed, not checked
+- Plan edits are not committed yet · uncommitted
+git: no tag at HEAD · in sync with origin/main (local tracking state)
+generation 000014-3fa09c1e
+```
 
 ## Keep it updated
 
@@ -82,6 +95,7 @@ After an update, run `/reload-plugins` or start a new session. The map of a mapp
 
 ## Reading the map
 
+- **Since the previous assessment:** (new in 3.4) the first thing under the header: commits landed and files uncommitted since Claude last assessed the project, up to three changes (each `landed, not checked by the map` or `uncommitted`), the one item that deserves your attention, and what the map could not check. A decision that waits for you is always that item. When the model saw only part of the new work, it says so (`40 of 60 commits shown to the model`).
 - **Top of the page:** the project name, its folder, the branch and short commit, when the snapshot was taken, and whether anything needs you. The headline under it is the main thing to know right now.
 - **Tiles:** a few at-a-glance numbers: the current phase, checks done out of total, the next step with who needs to act, and whether a decision waits for you.
 - **Phase list:** every phase is marked done, current, next or later, with its own checks done out of total. The current phase is open (“where we are”); the next phase sits beside it (“what's coming”).
@@ -90,6 +104,8 @@ After an update, run `/reload-plugins` or start a new session. The map of a mapp
 - **A little more context:** scroll down and open the rows for individual areas of work, recent changes, other decisions, risks, history and usage totals. Only available details appear.
 
 **“Assessment may be out of date”** means the project changed after Claude assessed it. The map stays visible with that warning. Run `/project-map` again to refresh it. If another session keeps changing the project, the warning may return.
+
+**“No decision identified in the checked information”** replaces “Nothing needs you” whenever the assessment is incomplete: it is behind the project, coverage is partial, tags are unverified, the attention item is not “continue”, or the model saw only part of the new work. The reasons are listed on the page (first two on the tile, all in the Snapshot row). “Nothing needs you” appears only when nothing is open and nothing is missing.
 
 To answer a decision, open “View the choices” or “Preview the choices,” then reply in Claude Code chat with the option letter, such as `A`. If several decisions are open, include the decision number: `D-004=A`. The page itself does not submit answers.
 
@@ -115,7 +131,7 @@ See the [FAQ](docs/FAQ.md) for safety, costs, updates, and uninstalling.
 
 ## For developers
 
-Current plugin version: **3.3.0**. Projects without Git history are supported; they use documents and file modification times.
+Current plugin version: **3.4.0**. Projects without Git history are supported; they use documents and file modification times.
 
 ### Local installation
 
@@ -190,9 +206,9 @@ Every deny is logged to `~/.claude/agent-memory/project-map/guard.log`. These ch
 
 ```bash
 bash tests/test_guard.sh    # 1053 cases: guard modes, binding, background launches, grammar, secret paths
-bash tests/test_embed.sh    # 1131 cases: facts + embed, generations, locks, migration, usage never failing a refresh, decisions overtaken by events
+bash tests/test_embed.sh    # 1314 cases: facts + embed, generations, locks, migration, usage never failing a refresh, decisions overtaken by events, since / seen / assurance / brief / page (RB-*)
 bash tests/test_git.sh      # 416 cases: pm_git core and the pm-git.sh agent wrapper
-bash tests/test_hooks.sh    # 129 cases: SessionStart, UserPromptSubmit, SubagentStart/Stop hooks, preflight sentences
+bash tests/test_hooks.sh    # 139 cases: SessionStart, UserPromptSubmit, SubagentStart/Stop hooks, preflight sentences
 bash tests/test_usage.sh    # 215 cases: incremental usage scan equals a full rescan, cache reuse, private counters-only output, budget and resume
 ```
 
@@ -208,7 +224,7 @@ skills/project-map/SKILL.md       /project-map entry point
 skills/project-map/full-run.md    FULL-run instructions (read by the agent)
 hooks/hooks.json                  guard (PreToolUse/PostToolUse/PostToolUseFailure/SubagentStart/SubagentStop), SessionStart, UserPromptSubmit
 scripts/                          facts, embed, git core, usage, guard, session hooks, template.html
-tests/                            guard, embed, git and hooks suites, fixture
+tests/                            guard, embed, git, hooks and usage suites, fixture, pm_page.js (Node DOM shim that runs the page script)
 docs/                             design spec, plans, interfaces, FAQ, history
 ```
 

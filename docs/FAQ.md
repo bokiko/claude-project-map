@@ -24,7 +24,11 @@ No. It writes map files inside `.project-map/`, can save its own memory notes, a
 
 ## Why do I see a short summary when I start Claude Code?
 
-In a mapped project, a SessionStart hook shows the saved brief (about 300 tokens, no model call). Its second line says when Claude last assessed the project and how many commits have landed since, so you can tell a stale map from a fresh one. It ends with a line saying to run `/project-map` to re-judge. Unmapped projects show nothing.
+In a mapped project, a SessionStart hook shows the saved brief (about 300 tokens, no model call). Its second line says when the snapshot was taken and when Claude last assessed the project (and `behind:` plus the reason when the project has moved on), and a later line says what changed since that assessment, so you can tell a stale map from a fresh one. It ends with a line saying to run `/project-map` to re-judge. Unmapped projects show nothing.
+
+## Why does it say “not checked by the map”?
+
+Each change in the “Since the previous assessment” section is either `landed, not checked by the map` or `uncommitted`. The map reads commits and files; it does not run your tests or try the feature, and a routine update is far too small to do that. So a change that landed is shown as landed, with the commit it points to, but never as “works”. What would show it works (a test run, a manual check) is listed under “not checked”. The same cautious wording appears when the model only saw part of the work: `40 of 60 commits shown to the model` means the update was written from 40 of the 60 new commits, and the map then says “No decision identified in the checked information” instead of “Nothing needs you”.
 
 ## What does it cost?
 

@@ -22,7 +22,7 @@ PART_ST = ("done", "in_progress", "stuck", "unknown")
 TONES = ("ok", "watch", "blocked")   # "stale" is set by the script (stale record), never by the model
 ACTORS = ("claude", "codex", "owner", "external")
 TOP_KEYS = {"generation", "project", "run", "watch", "repos", "headline", "parts", "current_phase", "criteria_updates",
-            "eta", "next_step", "decisions", "loops", "risks", "template_feedback"}
+            "eta", "next_step", "decisions", "loops", "risks", "template_feedback", "since"}
 SCRIPT_OWNED = ("answer", "answered_by", "answered_at", "status", "raised_at", "frozen",
                 "closed_by", "closed_at", "overtaken_why", "overtaken_ref")
 OPEN_ST = ("open", "overdue")
@@ -623,6 +623,7 @@ def validate_judgement(J, raw_len, ctx):
                 if u not in pids:
                     v.e("next_step.unblocks references unknown part %r" % str(u)[:24])
     _decisions(v, J, ctx)
+    _since(v, J, ctx)
     if v.lst(J.get("loops", []), "loops", 0, 4):
         lseen = set()
         for lp in J.get("loops", []):
@@ -726,6 +727,103 @@ def _decisions(v, J, ctx):
                 v.e("decision %s is open and has no resolves_when: carry it unchanged, only the owner's answer closes it" % i)
 
 
+# ---------------------------------------------------------------- since: what changed, what needs attention (13.2)
+SINCE_KINDS = ("decision", "continue", "waiting", "unchecked")
+CHANGE_STATES = ("landed", "uncommitted")
+
+
+def attention_candidates(J, ctx):
+    """Ids of the decisions that make `since.attention.kind` MANDATORY (13.2): open or overdue with ready != false in the
+    STAGED snapshot and not closed by overtaken in this judgement, plus decisions raised in this judgement with
+    ready != false. A staged decision with ready:false never forces (the model may flip it ready, the script reconciles
+    at publication, 13.5)."""
+    snap, prev = ctx["snap"], ctx.get("prev")
+    jd = {d["id"]: d for d in (J.get("decisions") or []) if isinstance(d, dict) and isinstance(d.get("id"), str)}
+    staged = {x["id"]: x for x in snap.get("decisions", []) if isinstance(x, dict) and isinstance(x.get("id"), str)}
+    prev_closed = {d.get("id") for d in (prev or {}).get("decisions", []) if isinstance(d, dict) and d.get("status") in CLOSED_ST}
+    out = []
+    for i, x in staged.items():
+        if x.get("status") in OPEN_ST and x.get("ready", True) is not False and not isinstance((jd.get(i) or {}).get("overtaken"), dict):
+            out.append(i)
+    for i, d in jd.items():
+        if i not in staged and i not in prev_closed and d.get("ready", True) is not False:
+            out.append(i)
+    return sorted(out)
+
+
+def _since(v, J, ctx):
+    """judgement.since: required when the pack carries a baseline (snapshot.since not null), absent or null on a first map."""
+    base = ctx["snap"].get("since")
+    s = J.get("since")
+    if base is None:
+        if s is not None:
+            v.e("since must be absent or null: this pack has no previous assessment to compare with (first map)")
+        return
+    if s is None:
+        v.e("since is required: the pack carries a baseline (changes[0-3], attention{kind,text,why[,id]}, not_checked[0-3])")
+        return
+    if not v.obj(s, "since", ("changes", "attention"), ("not_checked",)):
+        return
+    root, repos = ctx["root"], ctx["snap"].get("repos", [])
+    root_git = (next((r for r in repos if isinstance(r, dict) and r.get("path") == "."), None) or {}).get("vcs") == "git"
+    if v.lst(s["changes"], "since.changes", 0, 3):
+        seen_t = set()
+        for n, c in enumerate(s["changes"], 1):
+            w = "since.changes[%d]" % n
+            if not v.obj(c, w, ("text", "state"), ("ref",)):
+                continue
+            if v.s(c["text"], w + " text", 120):
+                norm = " ".join(c["text"].split()).casefold()
+                if norm in seen_t:
+                    v.e("%s text duplicates another change (texts must be unique)" % w)
+                seen_t.add(norm)
+            if not v.one_of(c["state"], w + " state", CHANGE_STATES):
+                continue
+            ref = c.get("ref")
+            if ref is not None and not isinstance(ref, str):
+                v.e("%s ref must be a string or null" % w)
+            elif c["state"] == "landed":
+                if not ref:
+                    v.e("%s is landed but has no ref: name the commit (commit:<sha7+>)" % w)
+                elif ref.startswith("commit:") or (ref.startswith("file:") and not root_git):
+                    pr_ = ref_problem(root, repos, ref)
+                    if pr_:
+                        v.e("%s ref: %s" % (w, pr_))
+                else:
+                    v.e("%s is landed: its ref must be commit:<sha7+>%s, not %s" % (
+                        w, "" if root_git else " (or file:<rel> in a project without git)", C.trim(ref, 40)))
+            elif ref is not None:   # uncommitted: working-tree work, a file ref at most
+                if not ref.startswith("file:"):
+                    v.e("%s is uncommitted: its ref must be file:<rel>[:line] or null, not %s" % (w, C.trim(ref, 40)))
+                else:
+                    pr_ = ref_problem(root, repos, ref)
+                    if pr_:
+                        v.e("%s ref: %s" % (w, pr_))
+    att = s["attention"]
+    must = attention_candidates(J, ctx)
+    if v.obj(att, "since.attention", ("kind", "text", "why"), ("id",)):
+        kind_ok = v.one_of(att["kind"], "since.attention.kind", SINCE_KINDS)
+        v.s(att["text"], "since.attention.text", 120)
+        v.s(att["why"], "since.attention.why", 120)
+        if kind_ok and att["kind"] == "decision":
+            aid = att.get("id")
+            if not isinstance(aid, str) or not DEC_ID.match(aid):
+                v.e("since.attention.id is required when kind is decision: a decision id (D-nnn)")
+            elif aid not in must:
+                v.e("since.attention.id %s is not an open decision that needs the owner (%s)" % (
+                    aid, "open and ready: " + ", ".join(must) if must else "none is open and ready in this pack"))
+        elif kind_ok:
+            if "id" in att:
+                v.e("since.attention.id must be absent unless kind is decision")
+            if must:
+                v.e("since.attention.kind must be decision (id %s): %s open and ready, the owner's decision always comes first"
+                    % (must[0], ", ".join(must)))
+    nc = s.get("not_checked", [])
+    if v.lst(nc, "since.not_checked", 0, 3):
+        for n, x in enumerate(nc, 1):
+            v.s(x, "since.not_checked[%d]" % n, 80)
+
+
 # ---------------------------------------------------------------- merge
 def diff_changes(prev, S, t):
     """What materially moved between the previous and the new state: [{id, label, text, to, at}] (cap 8)."""
@@ -823,9 +921,128 @@ def merge_decisions(J, snap, prev, root=None):
     return out
 
 
+# ---------------------------------------------------------------- since in the state, assurance, wording (13.4, 13.5)
+def ask_ids(decisions):
+    """Ids of the decisions that need the owner now: open or overdue with ready != false."""
+    return sorted(d["id"] for d in decisions if isinstance(d, dict) and d.get("status") in OPEN_ST and d.get("ready", True) is not False)
+
+
+def reconcile_attention(judged, decisions):
+    """R7/S1: the judged attention against the FINAL ready open/overdue decisions (after the final answers read, deferred
+    closures and late answers). -> (attention, judged-or-None). `judged` is kept as since.attention_judged whenever the script
+    replaced it. An answered decision id is never rendered as a current owner decision."""
+    ids = ask_ids(decisions)
+    kind, aid = judged.get("kind"), judged.get("id")
+    if kind == "decision" and aid in ids:
+        return judged, None
+    if ids:   # the judged attention is not about a decision that is still open: the lowest eligible one is the primary item
+        q = next((d.get("q") for d in decisions if d.get("id") == ids[0]), "")
+        return {"kind": "decision", "id": ids[0], "text": C.trim(q, 120), "why": "still open at publication", "by": "script"}, judged
+    if kind == "decision":   # it named a decision and none remains
+        return {"kind": "unchecked", "text": C.trim("%s was answered after the assessment; attention not reassessed" % aid, 120),
+                "why": "pending the next judgement", "by": "script"}, judged
+    return judged, None
+
+
+def build_since(snap, J, decisions, judged_seen):
+    """state.since (13.5): the script's counts as staged, `listed` from judged_seen, the model block verbatim, with the
+    attention reconciled against the final decisions. None when the pack had no baseline (first map)."""
+    base = snap.get("since")
+    block = J.get("since")
+    if not isinstance(base, dict) or not isinstance(block, dict):
+        return None
+    att, was = reconcile_attention(copy.deepcopy(block["attention"]), decisions)
+    out = {"from": {"generation": base.get("generation"), "assessed_at": base.get("assessed_at")},
+           "commits": base.get("commits"), "listed": (judged_seen or {}).get("commits") if judged_seen else None,
+           "dirty": base.get("dirty"), "hours": base.get("hours"),
+           "changes": copy.deepcopy(block.get("changes", [])), "attention": att, "not_checked": list(block.get("not_checked", []))}
+    if was is not None:
+        out["attention_judged"] = was
+    return out
+
+
+def _release_unverified(S):
+    for r in S.get("repos") or []:
+        rel = r.get("release") if isinstance(r, dict) else None
+        if not isinstance(rel, dict):
+            continue
+        key = rel.get("key") if isinstance(rel.get("key"), dict) else {}
+        if rel.get("inconsistent") or rel.get("head_tags_partial") or key.get("partial") or key.get("unverified"):
+            return True
+    return False
+
+
+def omitted_work(seen):
+    """Short phrases (<= 40 bytes) for the relevant work the judged pack left out (13.3 "Relevant work omitted")."""
+    out = []
+    if seen.get("commits", 0) < seen.get("commits_total", 0):
+        out.append("%d of %d commits shown to the model" % (seen["commits"], seen["commits_total"]))
+    if seen.get("dirty", 0) < seen.get("dirty_total", 0):
+        out.append("%d of %d changed files shown" % (seen["dirty"], seen["dirty_total"]))
+    if seen.get("decisions_cut"):
+        out.append("%d decisions cut in the pack" % seen["decisions_cut"])
+    if seen.get("answers_dropped"):
+        out.append("%d answers left out of the pack" % seen["answers_dropped"])
+    if seen.get("ledger_cut"):
+        out.append("ledger cut in the pack")
+    if seen.get("repos_cut"):
+        out.append("%d repos left out of the pack" % seen["repos_cut"])
+    if seen.get("watch_moved_cut"):
+        out.append("%d changed watch files not shown" % seen["watch_moved_cut"])
+    return [C.trim(x, 40) for x in out]
+
+
+def assurance(S):
+    """The ONE predicate behind page, brief and handoff (13.4): {ok, why[<=40 bytes each]}. Computed by build_state and
+    recomputed by every mechanical refresh from its own state; `ok` iff no clause adds a reason. 3.5/3.6 clauses (intent,
+    evidence) join here. A facts run that ran out of its budget before collecting publishes nothing (the verdict says
+    `(deferred: budget)`), so a published map's budget cut shows as partial coverage, which is the clause below."""
+    why = []
+    if ask_ids(S.get("decisions") or []):
+        why.append("decision open")
+    st = S.get("stale")
+    if st:
+        why.append(C.trim("assessment behind: %s" % (st.get("why") or "the project moved"), 40))
+    cv = S.get("coverage") or {}
+    if cv.get("coverage") != "complete":
+        why.append("coverage partial")
+    if (S.get("status") or {}).get("git_error"):
+        why.append("git error")
+    if _release_unverified(S):
+        why.append("tags unverified")
+    att = ((S.get("since") or {}).get("attention") or {}).get("kind")
+    if att is None:
+        why.append("attention not assessed")
+    elif att not in ("continue", "decision"):   # "decision" is already the first reason above
+        why.append("attention: %s" % att)
+    seen = S.get("judged_seen")
+    if not isinstance(seen, dict):
+        why.append("pack coverage unknown")
+    else:
+        why += omitted_work(seen)
+    return {"ok": not why, "why": why}
+
+
+NEEDS_TEXT = {"a": "Needs you", "b": "Nothing needs you", "c": "No decision identified in the checked information"}
+
+
+def needs_case(S):
+    """a: a decision needs the owner; b: none, and the assessment is complete; c: none, but it is not complete."""
+    if ask_ids(S.get("decisions") or []):
+        return "a"
+    a = S.get("assurance")
+    return "b" if (a if isinstance(a, dict) else assurance(S)).get("ok") else "c"
+
+
+def needs_text(S):
+    """The ONE three-way wording (13.4) of "does anything need the owner": page pill and tile, brief, handoff."""
+    return NEEDS_TEXT[needs_case(S)]
+
+
 def build_state(ctx):
     """ctx: root, snap, J (accepted, carried-forward), plan (after updates), prev (state|None), genstr, base, kept,
-    judged_at, n (run number), mode, stale. -> state dict (generation_files filled by the publisher)."""
+    judged_at, n (run number), mode, stale, judged_seen (the `seen` of the pack the model read, or None).
+    -> state dict (generation_files filled by the publisher)."""
     snap, J, prev, root = ctx["snap"], ctx["J"], ctx["prev"], ctx["root"]
     t = snap["facts_at"]
     phases, cur, blocking = derive_phases(ctx["plan"], J["current_phase"])
@@ -857,13 +1074,17 @@ def build_state(ctx):
         "watch": list(J.get("watch", [])), "watch_dropped": snap.get("watch_dropped", []),
         "repos": [dict({k: r.get(k) for k in ("path", "vcs", "branch", "head", "head_at")},
                        **({"release": r["release"]} if isinstance(r.get("release"), dict) else {})) for r in snap["repos"]],
-        "commits": snap["commits"], "status": {k: snap["status"][k] for k in ("dirty", "hash")},
+        "commits": snap["commits"], "status": dict({k: snap["status"][k] for k in ("dirty", "hash")},
+                                                    git_error=snap["status"].get("git_error")),
         "ledger": ({k: snap["ledger"][k] for k in ("path", "name", "goal", "now", "next", "blockers")} if snap.get("ledger") else None),
         "run": {"n": ctx["n"], "type": J["run"]["type"], "model": J["run"]["model"], "at": t},
         "template_feedback": J.get("template_feedback", []), "kept": ctx.get("kept", []),
         "retired_ids": [], "retired_decisions": "",
     }
     S["changes"] = diff_changes(prev, S, t) if prev else []
+    S["judged_seen"] = ctx.get("judged_seen")   # what the model saw of the staged snapshot (13.3); None = unknown
+    S["since"] = build_since(snap, J, decs, S["judged_seen"])
+    S["assurance"] = assurance(S)
     old_ids = [x["id"] for k in ("parts", "decisions") for x in (prev or {}).get(k, [])]
     new_ids = {p["id"] for p in parts} | {d["id"] for d in decs}
     retired = list((prev or {}).get("retired_ids", []))

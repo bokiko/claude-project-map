@@ -80,6 +80,12 @@ sys.stdout.write(t.rstrip("\n"))
 PY
 }
 
+# 13.4: facts ran out of its budget before it could refresh the map. Whatever brief is on disk was not refreshed, so it is not
+# presented as one; the line says so and what to do.
+case "$VLINE" in
+  *"(deferred: budget)"*) emit "project-map: facts not refreshed (budget); run /project-map"; exit 0 ;;
+esac
+
 case "$VERDICT" in
   NO_CHANGE|NEEDS_REFRESH|NEEDS_JUDGEMENT|NEEDS_FULL)
     # verify the pinned generation (sha256 + HMAC of its manifest) before trusting anything in it

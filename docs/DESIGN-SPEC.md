@@ -6,10 +6,10 @@ end of this file for history only.
 
 ## Structure (one visible layer, top to bottom)
 1. Header: eyebrow "Project map", top-right pill, project name (h1), tagline, one mono meta line.
-   - Pill, in priority order: "Assessment may be out of date" (stale), "Needs you", "Nothing needs you".
+   - Pill (3.4.0, INTERFACES 13.4): "Needs you" when a ready decision is open, "Nothing needs you" only when none is open and `state.assurance.ok`, else "No decision identified in the checked information". A stale map also shows "Assessment may be out of date · <why>" as its own line under the meta line. A state without `assurance` (before 3.4) keeps the earlier order: stale, "Needs you", "Nothing needs you".
    - Meta line (mono, the only text allowed below 13px): `~/folder` (identity.folder, or `…/` plus the last two components) · branch · date.
    - A "Coverage partial" notice appears under the meta line while coverage is partial.
-2. Four tiles: Progress (criteria shipped, bar, "n of m"), Phase (k/n and label), Needs you (count of ready decisions), Next step (accent tile, title only).
+2. "Since the previous assessment" section (3.4.0, only when `state.since` exists): card background, 1px border, 16px radius; eyebrow with the date, a count line, the attention row, up to three change rows, `not checked: ...`. Then four tiles: Progress (criteria shipped, bar, "n of m"), Phase (k/n and label), Needs you (count of ready decisions), Next step (accent tile, title only).
 3. Work area: left, the phase list (keyboard-selectable buttons, `role=tab`, `aria-selected`, arrow keys / Home / End; the current phase is selected by default); right, the selected phase's criteria. The decision block shows only under the current phase: question, lettered options (A, B ...), then "Waits for your answer" for hard-rule decisions, "Default <letter> on <date>" otherwise.
 4. "A little more context": disclosures in this order: Plan vs shipped (every criterion, status, evidence ref), Parts, Recent changes, Risks, History, Snapshot (headline, goal, folder, branch @ head, snapshot, assessment, generation, coverage, stale, working tree, next step, watched files), Usage. `?open=1` opens all.
 

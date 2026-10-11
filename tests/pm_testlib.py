@@ -7,6 +7,13 @@
   legacy ROOT                       write a 3.x style map under ROOT/.project-map from tests/demo-judgement.json
   holder PM                         hold the publish lock until killed
   reader PM SECONDS                 read current/* repeatedly, print MIXED <n> when generations disagree
+  assure FILE [CODE]                print assurance(S) and needs_text(S) as JSON for the state in FILE, after CODE edited d
+  brief FILE [CODE]                 print the brief rendered from the state in FILE, after CODE edited d (nothing is written)
+  seen PACK                         print the pack's `seen` record as JSON
+
+jud also writes judgement.out.json with a valid `since` (13.2): present when STAGE/snapshot.json carries a non-null `since`
+(UPDATE and a re-proposing FULL), absent on a first map. Its attention is the first open, ready decision when one forces it
+(computed AFTER the CODE edit, with the validator's own rule), else `continue`; CODE that edits J["since"] keeps its value.
 """
 import datetime as dt
 import fcntl
@@ -20,8 +27,36 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "demo-judgement.json")
 
 
-def build(inv, kind):
-    """Judgement + plan shaped like the demo-app fixture, in the 3.2 schema."""
+def staged_snapshot(stage):
+    try:
+        return json.load(open(os.path.join(stage, "snapshot.json")))
+    except (OSError, ValueError):
+        return None
+
+
+def forcing_decisions(J, snap):
+    """The decisions that make since.attention.kind decision mandatory (13.2): open/overdue with ready != false in the staged
+    snapshot and not closed by overtaken in J, plus ones J raises with ready != false."""
+    jd = {d["id"]: d for d in J.get("decisions", [])}
+    staged = {d["id"]: d for d in (snap or {}).get("decisions", [])}
+    out = [i for i, d in staged.items() if d.get("status") in ("open", "overdue") and d.get("ready", True) is not False
+           and not isinstance((jd.get(i) or {}).get("overtaken"), dict)]
+    out += [i for i, d in jd.items() if i not in staged and d.get("ready", True) is not False]
+    return sorted(out)
+
+
+def valid_since(J, snap):
+    ids = forcing_decisions(J, snap)
+    if ids:
+        q = next((d["q"] for d in J["decisions"] if d["id"] == ids[0]), "")
+        att = {"kind": "decision", "id": ids[0], "text": q[:100], "why": "Waiting on your answer"}
+    else:
+        att = {"kind": "continue", "text": "Work can continue without the owner", "why": "Nothing is blocked on you"}
+    return {"changes": [], "attention": att, "not_checked": []}
+
+
+def build(inv, kind, stage=None):
+    """Judgement + plan shaped like the demo-app fixture, in the 3.2 schema (+ the 3.4 `since` block when the pack has a baseline)."""
     F = json.load(open(FIX))
     parts = []
     for p in F["parts"]:
@@ -54,12 +89,15 @@ def build(inv, kind):
          "phases": [{"id": "P1", "label": names[0], "criteria": [{"id": "P1.c1", "text": "Weights load", "done": True, "ref": "file:PLAN.md:10"}]},
                     {"id": "P2", "label": names[1], "criteria": crit},
                     {"id": "P3", "label": names[2], "criteria": []}]}
+    snap = staged_snapshot(stage) if stage else None
+    if (snap.get("since") is not None) if snap is not None else kind == "update":
+        J["since"] = valid_since(J, snap)
     return J, P
 
 
 def cmd_jud(pm, inv, kind, code=""):
     stage = os.path.join(pm, inv)
-    J, P = build(inv, kind)
+    J, P = build(inv, kind, stage)
     if kind == "update":   # keep the carried plan's phase ids
         plan = json.load(open(os.path.join(stage, "plan.json")))
         ids = [p["id"] for p in plan["phases"]]
@@ -68,7 +106,10 @@ def cmd_jud(pm, inv, kind, code=""):
         J["current_phase"] = "P2"
     if kind != "full" and os.path.exists(os.path.join(stage, "plan.out.json")):
         os.remove(os.path.join(stage, "plan.out.json"))
+    before = json.dumps(J.get("since"), sort_keys=True)
     exec(code, {"J": J, "P": P, "json": json, "os": os, "dt": dt})
+    if "since" in J and J["since"] is not None and json.dumps(J["since"], sort_keys=True) == before:
+        J["since"]["attention"] = valid_since(J, staged_snapshot(stage))["attention"]   # the CODE may have raised or flipped decisions
     json.dump(J, open(os.path.join(stage, "judgement.out.json"), "w"))
     if kind == "full":
         json.dump(P, open(os.path.join(stage, "plan.out.json"), "w"))
@@ -102,6 +143,32 @@ def cmd_legacy(root):
     for n, t in (("index.html", "<html>legacy</html>"), ("mobile.html", "<html>m</html>"), ("brief.txt", "legacy brief\n")):
         open(os.path.join(pm, n), "w").write(t)
     open(os.path.join(pm, "answers.jsonl"), "w").write(json.dumps({"id": "D-001", "answer": "A", "at": "2026-10-06T11:00:00+03:00", "by": "owner"}) + "\n")
+
+
+def _scripts():
+    sys.path.insert(0, os.environ["PM_SCRIPTS"])
+    sys.dont_write_bytecode = True
+
+
+def cmd_assure(path, code=""):
+    _scripts()
+    import pm_validate as V
+    d = json.load(open(path))
+    exec(code, {"d": d, "S": d, "json": json})
+    d["assurance"] = V.assurance(d)   # the stored assurance is always the recomputed one (build_state / mechanical refresh)
+    print(json.dumps({"assurance": d["assurance"], "case": V.needs_case(d), "text": V.needs_text(d)}))
+
+
+def cmd_brief(path, code=""):
+    _scripts()
+    import pm_render as R
+    d = json.load(open(path))
+    exec(code, {"d": d, "S": d, "json": json})
+    sys.stdout.write(R.brief(d))
+
+
+def cmd_seen(path):
+    print(json.dumps(json.load(open(path)).get("seen")))
 
 
 def cmd_resign(gdir):
@@ -157,4 +224,5 @@ def cmd_reader(pm, secs):
 
 if __name__ == "__main__":
     c = sys.argv[1]
-    {"jud": cmd_jud, "get": cmd_get, "mut": cmd_mut, "legacy": cmd_legacy, "resign": cmd_resign, "holder": cmd_holder, "reader": cmd_reader}[c](*sys.argv[2:])
+    {"jud": cmd_jud, "get": cmd_get, "mut": cmd_mut, "legacy": cmd_legacy, "resign": cmd_resign, "holder": cmd_holder, "reader": cmd_reader,
+     "assure": cmd_assure, "brief": cmd_brief, "seen": cmd_seen}[c](*sys.argv[2:])

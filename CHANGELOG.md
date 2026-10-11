@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.4.0 (2026-10-11)
+
+### Added
+- **What changed since the previous assessment, first.** Coming back to a project meant re-reading chats. The page now opens with a "Since the previous assessment" section (between the header and the tiles) and the session-start brief carries the same facts: how many commits landed and how many files are uncommitted since the map was last judged (counted by the scripts against the previous assessment, never against "your last visit"), up to three changes in plain words, the one thing that deserves attention, and what the map could not check. Each change says `landed, not checked by the map` or `uncommitted`; the map never says "checked", because a four-call update cannot show that something works. A change is called landed only with a commit that really exists (or, in a project without git, a real file).
+- **A decision always comes first.** While a decision waits for you, it is the attention item; the judgement is rejected if it says "work can continue" instead. If an answer or a deferred closure changes which decisions are open between the judgement and the publication, the scripts correct the attention themselves and keep the model's original under `attention_judged`; an answered decision is never shown as one that still needs you.
+- **The map says what the model saw.** Each pack now records what it left out (commits listed of commits total, uncommitted files, cut decisions, dropped answers, a cut ledger, dropped repositories, changed watched files that were trimmed away), measured on the pack the model actually read. When relevant work was omitted, the page and the brief say so ("40 of 60 commits shown to the model") instead of pretending the batch was complete.
+- **One honest answer to "does anything need me?"** A single script-owned check (`state.assurance`) now decides the wording of the page pill, the "Needs you" tile and the brief: `Needs you` when a decision is ready, `Nothing needs you` only when nothing is open and the assessment is complete, otherwise `No decision identified in the checked information` with the reasons (a stale assessment, partial coverage, unverified tags, attention that is not "continue", omitted work). A session-start brief produced when facts ran out of budget is no longer shown as fresh: the hook says `project-map: facts not refreshed (budget); run /project-map`.
+- Contract: `docs/INTERFACES-3.2.md` section 13. The state schema stays `project-map-4` (additive fields: `since`, `judged_seen`, `assurance`, `status.git_error`); older maps still render and say so until their first 3.4 judgement.
+
+### Changed
+- **Brief layout.** Line 2 is now `as of <snapshot minute> · assessed <judged minute> · current` or `behind: <why>`, followed by the first reason the assessment is incomplete when nothing needs you. New lines: `attention: ...`, `since <minute>: N commits · M uncommitted · k changes` and up to three `- <change> · landed, not checked | uncommitted`. The release line (`git: ...`) now sits below the next step and the overtaken-by-events lines. Lines are still whole, at most 1000 bytes, and are dropped in a fixed order (tokens, git, changes, since, attention, overtaken, stale/coverage) before the decisions collapse into `+N more decisions`; the next step and the generation line are never dropped. A very long folder is shortened to 60 bytes.
+- **A watched path added during an update counts toward coverage.** When the update adds a path to the watch list, the publish step checks it on the spot; if that check cannot finish, the map shows coverage partial instead of "Nothing needs you".
+- **Pill.** A stale map with an open decision now says `Needs you` (before: `Assessment may be out of date`); the out-of-date warning is its own line under the project metadata.
+- Agent prompt and FULL run: the `since` rules (a consequence, not a commit subject; no "checked"; a decision is always the attention item; never "continue" when the pack cut work). Judgement size target 3.5 KB, hard limit unchanged at 6 KB.
+- Existing tests that asserted the old brief layout were updated (E-brief line 2, F-stale-refresh, REL-brief); a Node DOM shim (`tests/pm_page.js`) lets the suites run the page's own JavaScript.
+- Suites: guard 1053, git 416, embed 1314, hooks 139, usage 215 (3137 cases, five suites), each under `bash` and `/bin/bash` 3.2. Every new rule was mutation-checked (59 deliberate breaks of the code, each caught by a named test).
+
 ## 3.3.0 (2026-10-10)
 
 ### Fixed

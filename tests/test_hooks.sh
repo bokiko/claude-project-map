@@ -133,6 +133,24 @@ run_hook session "$R"
 eq "S ERROR context" "project-map: ERROR git collection failure; run /project-map" "$CTX"
 eq "S ERROR exit 0" 0 "$RC"
 
+# H-deferred (13.4): facts ran out of its budget and did not refresh: the brief on disk is not presented as refreshed
+reset_stub; STUB_VERDICT="NEEDS_REFRESH facts incomplete (deferred: budget)"
+run_hook session "$R"
+eq "H-deferred: NEEDS_REFRESH (deferred: budget) -> the not-refreshed line, no brief" "project-map: facts not refreshed (budget); run /project-map" "$CTX"
+eq "H-deferred: ... exit 0" 0 "$RC"
+reset_stub; STUB_VERDICT="NEEDS_REFRESH plugin files changed (deferred: budget)"
+run_hook session "$R"
+eq "H-deferred: any refresh reason carrying the token gets the same line" "project-map: facts not refreshed (budget); run /project-map" "$CTX"
+reset_stub; STUB_VERDICT="NEEDS_FULL first map (deferred: budget)"
+run_hook session "$R"
+eq "H-deferred: NEEDS_FULL (deferred: budget) too" "project-map: facts not refreshed (budget); run /project-map" "$CTX"
+reset_stub; STUB_VERDICT="NEEDS_REFRESH coverage partial 1/3 (deferred: budget)"
+run_hook session "$R"
+eq "H-deferred: ... also after the reason (a partial coverage refresh that was deferred)" "project-map: facts not refreshed (budget); run /project-map" "$CTX"
+reset_stub; STUB_VERDICT="NEEDS_REFRESH coverage partial 1/3"
+run_hook session "$R"
+eq "H-deferred: without the token the brief is injected as before" "$BRIEF$EXTRA_OK" "$CTX"
+
 reset_stub; STUB_VERDICT=""
 run_hook session "$R"
 eq "S empty verdict context" "project-map: facts printed no verdict; run /project-map" "$CTX"
@@ -399,6 +417,16 @@ if [ "$MAPPED" = 1 ] && [ "$HAVE_VERIFY" = 1 ]; then
   case "$CTX" in *"map is behind: "*"; run /project-map") B=1 ;; *) B=0 ;; esac
   ok "H-session: moved repo -> 'map is behind' line" "$B"
   eq "H-session: no staging dir created by the hook" "$NINV" "$(ls "$RPM" | grep -c '^inv-')"
+  # H-since: after a judged update the brief the hook injects carries line 7 (what changed since the previous assessment)
+  VL=$(renv python3 "$RP/scripts/project-map-facts.py" "$RR"); INVN="inv-${VL##* }"
+  python3 "$HERE/tests/pm_testlib.py" jud "$RPM" "$INVN" update >/dev/null 2>&1
+  EO=$(renv bash "$RP/scripts/project-map-embed.sh" "$RR" "$INVN")
+  case "$EO" in "PM_EMBED_OK gen "*) B=1 ;; *) B=0; echo "NOTE: update not published: $VL | $EO" ;; esac
+  ok "H-since: a judged update publishes" "$B"
+  run_real session "$RR"
+  eq "H-since: the SessionStart context carries line 7: since <assessment minute>: 1 commits · 0 uncommitted · 0 changes" "1" "$(printf '%s\n' "$CTX" | grep -cE '^since 20[0-9-]+T[0-9:]{5}: 1 commits · [0-9]+ uncommitted · 0 changes$')"
+  eq "H-since: ... and line 2 names both times" "1" "$(printf '%s\n' "$CTX" | grep -cE '^as of 20[0-9-]+T[0-9:]{5} · assessed 20[0-9-]+T[0-9:]{5} · (current|behind: )')"
+  eq "H-since: ... the injected brief ends with the generation trailer and the map line" "map: $RR/.project-map/index.html · /project-map re-judges" "$(printf '%s\n' "$CTX" | tail -n 1)"
 else
   echo "SKIP: H-session (needs the scratch map and pm_common.verify_generation; mapped=$MAPPED verify=$HAVE_VERIFY)"
 fi

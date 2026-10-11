@@ -1164,7 +1164,20 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
         "decisions": decs, "usage": usage, "key": key, "prev_key": prev.get("judged_key"),
         "template_hash": th, "embed_hash": eh,
     }
+    snap["since"] = since_baseline(prev, t, snap["commits"]["count"], len(dirty))
     return snap
+
+
+def since_baseline(prev, t, commits, dirty):
+    """13.1: what moved since the PREVIOUS ASSESSMENT (never "your last visit"): {generation, assessed_at, commits, dirty,
+    hours}. Commits are counted against judged_key.heads, which a mechanical refresh keeps, so the baseline is the previous
+    JUDGED generation. None on a first map and on a 3.x (legacy) migration: there is no previous assessment to compare with."""
+    if prev.get("kind") != "v4" or not isinstance(prev.get("state"), dict):
+        return None
+    raw = prev["state"].get("judged_at")
+    at = C.parse_iso(raw) if isinstance(raw, str) else None
+    return {"generation": prev.get("gen"), "assessed_at": raw if at is not None else None, "commits": commits, "dirty": dirty,
+            "hours": max(0, int((t - at).total_seconds() // 3600)) if at is not None else None}
 
 
 def compare_keys(judged, key, snap):
@@ -1246,6 +1259,7 @@ def build_pack(snap, inv_name):
     """Bounded model-facing view, <= 8192 bytes. Trim order: commit items, watch hashes, ledger, answers, decisions, usage."""
     p = {k: snap[k] for k in ("schema", "base", "root", "facts_at", "repos", "commits", "status", "watch", "ledger",
                               "answers", "decisions", "usage", "watch_dropped", "dirty_paths", "template_hash")}
+    p["since"] = snap.get("since")   # 13.1: the baseline the model judges against; small, never trimmed
     p = C.loads(C.dumps(p))   # deep copy
     p["schema"] = "project-map-pack-1"
     p["generation"] = inv_name
@@ -1355,10 +1369,61 @@ def build_pack(snap, inv_name):
                                                            **({"resolved": d["resolved"]} if "resolved" in d else {})) for d in p["decisions"]]),
              lambda: p.update(repos=[{"path": r.get("path"), "vcs": r.get("vcs"), "head": r.get("head"),
                                                     "release_line": r.get("release_line")} for r in p["repos"][:4]])]
-    for s in steps:
+    # `seen` (13.3) describes the pack the model will actually read, so it is computed from the FINAL pack object and then
+    # counted in the size check: after every step the pack is measured WITH its current `seen`; if that is over the cap the
+    # next trim step runs and `seen` is recomputed from the new state. `seen` is small and never trimmed itself.
+    n_steps = 0
+    while True:
+        p["seen"] = compute_seen(snap, p)
         if size() <= PACK_MAX:
             break
-        s()
-    if size() > PACK_MAX:
-        raise PackOverflow("pack over 8 KB")
+        if n_steps >= len(steps):
+            raise PackOverflow("pack over 8 KB")
+        steps[n_steps]()
+        n_steps += 1
     return p
+
+
+SEEN_KEYS = ("commits", "commits_total", "dirty", "dirty_total", "decisions_cut", "answers_dropped", "ledger_cut", "repos_cut",
+             "watch_moved", "watch_moved_cut")
+
+
+def watch_moved_paths(snap):
+    """Watched paths whose hash moved against the judged key (snapshot prev_key). A path hashed only partially on either side
+    is not a move (compare_keys treats it the same way), and neither is a path the judged key did not have."""
+    jw = (snap.get("prev_key") or {}).get("watch_hashes") if isinstance(snap.get("prev_key"), dict) else None
+    nw = (snap.get("key") or {}).get("watch_hashes") or {}
+    if not isinstance(jw, dict):
+        return []
+    return sorted(q for q in nw if q in jw and "partial" not in (jw[q], nw[q]) and jw[q] != nw[q])
+
+
+def compute_seen(snap, p):
+    """What the model can see of the staged snapshot (13.3), measured on the pack object `p` itself, after every trim step
+    that has run. Hash-only cuts, recent tags and usage detail are not omissions of relevant work."""
+    days = (p.get("commits") or {}).get("days") or []
+    shown = sum(len(d.get("items") or []) for d in days if isinstance(d, dict))
+    pdec = {d.get("id"): d for d in (p.get("decisions") or []) if isinstance(d, dict)}
+    dec_cut = 0
+    lab = lambda dd: [o.get("label") for o in (dd.get("options") or []) if isinstance(o, dict)]
+    for d in snap.get("decisions") or []:
+        x = pdec.get(d.get("id"))
+        if x is None or x.get("q") != d.get("q") or lab(x) != lab(d):
+            dec_cut += 1   # a decision the pack lost, or whose question or option text was cut
+    led, pled = snap.get("ledger"), p.get("ledger")
+    ledger_cut = bool(led) and (not pled or any(pled.get(k) != led.get(k) for k in ("goal", "now", "next", "blockers")))
+    listed = {w["path"] if isinstance(w, dict) else w for w in (p.get("watch") or [])}
+    moved = watch_moved_paths(snap)
+    return {"commits": shown, "commits_total": (snap.get("commits") or {}).get("count", 0),
+            "dirty": len(p.get("dirty_paths") or []), "dirty_total": (snap.get("status") or {}).get("dirty", 0),
+            "decisions_cut": dec_cut,
+            "answers_dropped": max(0, len((snap.get("answers") or {}).get("pending") or []) - len((p.get("answers") or {}).get("pending") or [])),
+            "ledger_cut": ledger_cut, "repos_cut": max(0, len(snap.get("repos") or []) - len(p.get("repos") or [])),
+            "watch_moved": len(moved), "watch_moved_cut": sum(1 for q in moved if q not in listed)}
+
+
+def valid_seen(x):
+    """A `seen` record as stored in a pack (shape check for embed, which reads it back from STAGE/pack.json)."""
+    return isinstance(x, dict) and set(x) == set(SEEN_KEYS) \
+        and all(isinstance(x[k], bool) if k == "ledger_cut" else (isinstance(x[k], int) and not isinstance(x[k], bool) and x[k] >= 0)
+                for k in SEEN_KEYS)

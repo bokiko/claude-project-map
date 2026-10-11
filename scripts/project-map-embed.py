@@ -409,6 +409,8 @@ def embed_normal(root, inv_name, clock):
             raise EmbedError("snapshot.json is missing or does not belong to %s" % inv_name)
         pack = staged_pack(stage, inv_name)
         judged_seen = staged_seen(stage, inv_name, pack)
+        # 3.6.1: the revision of the pack the model read (a pack from before 3.6.1 carries none: revision 1)
+        judged_pack = pack["rev"] if isinstance(pack, dict) and isinstance(pack.get("rev"), int) and not isinstance(pack.get("rev"), bool) else 1
         plan_in = C.load_json(os.path.join(stage, "plan.json"))
         jin = C.load_json(os.path.join(stage, "judgement.in.json"), {})
         raw = _read(os.path.join(stage, "judgement.out.json"))
@@ -555,7 +557,7 @@ def embed_normal(root, inv_name, clock):
 
         def make(genstr):
             c = {"root": root, "snap": snap2, "J": J, "plan": final_plan, "prev": pseudo, "genstr": genstr, "base": cur,
-                 "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale, "judged_seen": judged_seen,
+                 "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale, "judged_seen": judged_seen, "judged_pack": judged_pack,
                  "staged_intent": snap.get("intent"),   # the target is frozen from the STAGED input (14.3), accepted from snap2
                  "fit_res": ctx.get("fit_res"), "recheck": recheck}
             S = VAL.build_state(c)

@@ -131,7 +131,7 @@ def brief(S):
         if isinstance(sn.get("listed"), int) and sn["listed"] < (sn.get("commits") or 0):
             l7 += " \u00b7 %d of %d shown" % (sn["listed"], sn["commits"])
         for c in (sn.get("changes") or [])[:3]:
-            l8.append("- %s \u00b7 %s" % (c.get("text", ""), "landed, not checked" if c.get("state") == "landed" else "uncommitted"))
+            l8.append("- %s \u00b7 %s" % (c.get("text", ""), "committed, not verified yet" if c.get("state") == "landed" else "uncommitted"))
     ov = ["%s overtaken by events: %s (%s)" % (d["id"], C.trim(d.get("overtaken_why", ""), 120), C.trim(d.get("overtaken_ref", ""), 80))
           for d in S["decisions"] if d["status"] == "overtaken"]   # information for one generation, never "needs you"
     rl = ""
@@ -264,7 +264,7 @@ def handoff(S):
         if isinstance(sn.get("listed"), int) and sn["listed"] < (sn.get("commits") or 0):
             l7 += " \u00b7 %d of %d shown" % (sn["listed"], sn["commits"])
         for c in (sn.get("changes") or [])[:3]:
-            l8.append("- %s \u00b7 %s" % (C.trim(c.get("text", ""), 120), "landed, not checked" if c.get("state") == "landed" else "uncommitted"))
+            l8.append("- %s \u00b7 %s" % (C.trim(c.get("text", ""), 120), "committed, not verified yet" if c.get("state") == "landed" else "uncommitted"))
     ns = S.get("next_step") or {}
     l9 = "Next: %s (%s): %s" % (C.trim(ns.get("title", ""), 80), ns.get("actor", ""), C.trim(ns.get("why", ""), 160))
     fit = _departure(S)   # 15.4 line 9b: only a departure is worth a line in an assignment

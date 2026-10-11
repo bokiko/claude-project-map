@@ -11,10 +11,10 @@
 
 <!-- TECH BADGES: flat-square style, unified color 2ecc71 -->
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-3.6.0-2ecc71?style=flat-square" alt="Version 3.6.0">
+  <img src="https://img.shields.io/badge/Version-3.6.1-2ecc71?style=flat-square" alt="Version 3.6.1">
   <img src="https://img.shields.io/badge/Python-3.9%2B-2ecc71?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Bash-3.2%2B-2ecc71?style=flat-square&logo=gnubash&logoColor=white" alt="Bash">
-  <img src="https://img.shields.io/badge/Tests-3629%20passing-2ecc71?style=flat-square" alt="3629 tests passing">
+  <img src="https://img.shields.io/badge/Tests-3690%20passing-2ecc71?style=flat-square" alt="3690 tests passing">
   <img src="https://img.shields.io/badge/License-MIT-2ecc71?style=flat-square" alt="License MIT">
 </p>
 
@@ -136,7 +136,7 @@ See the [FAQ](docs/FAQ.md) for safety, costs, updates, and uninstalling.
 
 ## For developers
 
-Current plugin version: **3.6.0**. Projects without Git history are supported; they use documents and file modification times.
+Current plugin version: **3.6.1**. Projects without Git history are supported; they use documents and file modification times.
 
 ### Local installation
 
@@ -211,7 +211,7 @@ Every deny is logged to `~/.claude/agent-memory/project-map/guard.log`. These ch
 
 ```bash
 bash tests/test_guard.sh    # 1053 cases: guard modes, binding, background launches, grammar, secret paths
-bash tests/test_embed.sh    # 1794 cases: facts + embed, generations, locks, migration, usage never failing a refresh, decisions overtaken by events, since / seen / assurance / brief / page (RB-*), confirmed focus / model-free confirmation / handoff (FC-*; PM_FC_ONLY=1 runs these alone), lost completion evidence / fit / drift (DR-*; PM_DR_ONLY=1 runs these alone)
+bash tests/test_embed.sh    # 1855 cases: facts + embed, generations, locks, migration, usage never failing a refresh, decisions overtaken by events, since / seen / assurance / brief / page (RB-*), confirmed focus / model-free confirmation / handoff (FC-*; PM_FC_ONLY=1 runs these alone), lost completion evidence / fit / drift and the 3.6.1 pack, window and page fixes (DR-*, FX-*; PM_DR_ONLY=1 runs these alone)
 bash tests/test_git.sh      # 416 cases: pm_git core and the pm-git.sh agent wrapper
 bash tests/test_hooks.sh    # 151 cases: SessionStart, UserPromptSubmit, SubagentStart/Stop hooks, preflight sentences
 bash tests/test_usage.sh    # 215 cases: incremental usage scan equals a full rescan, cache reuse, private counters-only output, budget and resume

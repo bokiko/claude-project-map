@@ -26,6 +26,9 @@ DEFAULT_WATCH = ("README*", "PLAN*", "ROADMAP*", "TODO*", "CHANGELOG*", "docs", 
 GIT_KEYS = ("heads", "branches", "status_hash", "release")
 MAX_COMMITS = 40
 PACK_MAX = 8192
+PACK_REV = 2        # 3.6.1: the pack revision; a judgement that read a CUT pack of an older revision is redone once (facts decide)
+DIRTY_LIST = 20     # changed files the snapshot lists one by one (work first, hidden folders last)
+DIRTY_DIRS_MAX = 12  # folder counts for the changed files not listed one by one
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -1609,17 +1612,21 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     hd = hash_deadline
     heads_prev = (prev.get("judged_key") or {}).get("heads", {}) if isinstance(prev.get("judged_key"), dict) else {}
 
+    base, base_from = window_base(root, prev)   # 16.6: an earlier start while commits in between were never read
     repos, commits, sh, dirty, total_count = [], [], hashlib.sha256(), [], 0
-    rel_cache = {}
+    rel_cache, window_heads = {}, {}
     for rp in ["."] + nested:
-        ph = heads_prev.get(rp)
-        info, cnt, sig, dp, cm = collect_repo(root, rp, ph if isinstance(ph, str) and re.match(r"^[0-9a-f]{7,40}$", ph or "") else None, watch, git_timeout, rel_cache)
+        ph = base.get(rp, "") if base is not None else heads_prev.get(rp)   # J1: unnamed in a held window = from its history
+        ph = ph if isinstance(ph, str) and re.match(r"^[0-9a-f]{7,40}$", ph or "") else None
+        window_heads[rp] = ph or ""   # every repository, "" = this window starts at its history (no earlier head)
+        info, cnt, sig, dp, cm = collect_repo(root, rp, ph, watch, git_timeout, rel_cache)
         commits += cm
         total_count += cnt
         repos.append(info)
         sh.update(rp.encode() + b"\0" + str(sig).encode())
         dirty += dp
     commits.sort(key=lambda c: c["day"], reverse=True)
+    dirty.sort(key=dirty_rank)   # 3.6.1: work first; files inside hidden folders (backups, caches) after it (stable within each)
 
     wc = cache.setdefault("watch_cache", {})
     fpw = {}
@@ -1680,7 +1687,7 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
         "repos": repos, "commits": group_commits(commits, total_count),
         "status": {"hash": key["status_hash"], "dirty": len(dirty), "coverage": "partial" if partial else "complete",
                    "covered": covered, "total": total, "git_error": None},
-        "dirty_paths": dirty[:20], "watch": wl, "watch_dropped": dropped, "ledger": ledger,
+        "dirty_paths": dirty[:DIRTY_LIST], "dirty_dirs": dirty_dirs(dirty[DIRTY_LIST:]), "watch": wl, "watch_dropped": dropped, "ledger": ledger,
         "answers": {"total": len(lines), "applied": ap, "applied_hash": ah, "total_hash": prefix_hash(lines, len(lines)),
                     "pending": pending, "bad": bad, "tail": tail},
         "decisions": decs, "usage": usage, "key": key, "prev_key": prev.get("judged_key"),
@@ -1688,19 +1695,78 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
         "evidence": evidence, "file_fp": file_fp,
         "commit_oids": {"%s|%s" % (c["r"], c["h"]): c["o"] for c in commits if c.get("o")},
     }
-    snap["since"] = since_baseline(prev, t, snap["commits"]["count"], len(dirty))
+    snap["since"] = since_baseline(prev, t, snap["commits"]["count"], len(dirty), base_from)
+    snap["window_heads"] = window_heads   # 16.6: where this commit window started, per repository (read by build_state)
     return snap
 
 
-def since_baseline(prev, t, commits, dirty):
+GEN_RE = re.compile(r"^[0-9]{6,}-[0-9a-f]{8}$")
+HEAD_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _heads_norm(h):
+    """K1: a null head (a plain folder, an unborn repository) is the history-start marker "": the same start, one spelling."""
+    return {r: ("" if v is None else v) for r, v in h.items()} if isinstance(h, dict) else h
+
+
+def _heads_ok(h, jh):
+    """A window start: {repo: head}, where "" means the repository's window starts at its history (no earlier head: it was new).
+    Both sides are compared normalized (null = "")."""
+    h, jh = _heads_norm(h), _heads_norm(jh)
+    return isinstance(h, dict) and bool(h) and h != jh and all(isinstance(r, str) and isinstance(v, str) and (v == "" or HEAD_RE.match(v))
+                                                               for r, v in h.items())
+
+
+def window_base(root, prev):
+    """3.6.1 (16.6): where the commit window starts. Commits leave the window only once a judgement read every commit its snapshot
+    listed (`state.read`, written by every judged publication). -> (heads {repo: head}, {generation, assessed_at}), or (None, None)
+    for the ordinary window (the judged heads, since the previous generation). A state from before 3.6.1 has no `read`: when its
+    judgement read fewer commits than its snapshot listed (its pack cut them), the window restarts at the judged heads of the
+    generation that judgement was measured from (`since.from.generation`) while that generation is on disk and verifies.
+    J1: a repository the returned start does not name starts at its history ("" in `window_heads`), never at its judged head."""
+    S = prev.get("state") if prev.get("kind") == "v4" else None
+    if not isinstance(S, dict):
+        return None, None
+    jk = prev.get("judged_key")
+    jh = jk.get("heads") if isinstance(jk, dict) else None
+    rd = S.get("read")
+    if isinstance(rd, dict):
+        h = rd.get("heads")
+        if _heads_ok(h, jh):
+            return _heads_norm(h), {"generation": rd.get("generation"), "assessed_at": rd.get("assessed_at")}
+        return None, None
+    seen = S.get("judged_seen")
+    cm = S.get("commits")
+    listed = cm.get("listed") if isinstance(cm, dict) else None
+    if not (isinstance(seen, dict) and isinstance(seen.get("commits"), int) and isinstance(listed, int) and seen["commits"] < listed):
+        return None, None
+    sn = S.get("since")
+    g = (sn.get("from") or {}).get("generation") if isinstance(sn, dict) and isinstance(sn.get("from"), dict) else None
+    pm = os.path.join(root, ".project-map")
+    if not isinstance(g, str) or not GEN_RE.match(g) or not C.verify_generation(os.path.join(pm, C.gen_dir_name(g))):
+        return None, None
+    try:
+        B = C.loads(C.read_pinned(pm, g, "state.json") or b"null")
+    except ValueError:
+        return None, None
+    bk = B.get("judged_key") if isinstance(B, dict) else None
+    h = bk.get("heads") if isinstance(bk, dict) else None
+    if not _heads_ok(h, jh):
+        return None, None
+    return _heads_norm(h), {"generation": g, "assessed_at": B.get("judged_at")}
+
+
+def since_baseline(prev, t, commits, dirty, base_from=None):
     """13.1: what moved since the PREVIOUS ASSESSMENT (never "your last visit"): {generation, assessed_at, commits, dirty,
     hours}. Commits are counted against judged_key.heads, which a mechanical refresh keeps, so the baseline is the previous
-    JUDGED generation. None on a first map and on a 3.x (legacy) migration: there is no previous assessment to compare with."""
+    JUDGED generation. None on a first map and on a 3.x (legacy) migration: there is no previous assessment to compare with.
+    `base_from` (16.6): the window starts earlier because commits in between were never read: the baseline is that point."""
     if prev.get("kind") != "v4" or not isinstance(prev.get("state"), dict):
         return None
-    raw = prev["state"].get("judged_at")
+    raw = base_from.get("assessed_at") if isinstance(base_from, dict) else prev["state"].get("judged_at")
     at = C.parse_iso(raw) if isinstance(raw, str) else None
-    return {"generation": prev.get("gen"), "assessed_at": raw if at is not None else None, "commits": commits, "dirty": dirty,
+    gen = base_from.get("generation") if isinstance(base_from, dict) and isinstance(base_from.get("generation"), str) else prev.get("gen")
+    return {"generation": gen, "assessed_at": raw if at is not None else None, "commits": commits, "dirty": dirty,
             "hours": max(0, int((t - at).total_seconds() // 3600)) if at is not None else None}
 
 
@@ -1794,8 +1860,29 @@ def compare_keys(judged, key, snap):
 
 
 # ---------------------------------------------------------------- pack (6.2)
+def dirty_rank(path):
+    """3.6.1: 1 for a changed file inside a hidden folder (a component starting with '.') or a __pycache__ folder, else 0."""
+    return 1 if any(x.startswith(".") or x == "__pycache__" for x in path.split("/")[:-1]) else 0
+
+
+def dirty_dir(path):
+    """The top-level folder a changed file is counted under ('./' for a file at the root)."""
+    return path.split("/", 1)[0] + "/" if "/" in path else "./"
+
+
+def dirty_dirs(paths, counts=None):
+    """3.6.1: [{dir, n}] for `paths` (added to `counts`), most files first, then by name, at most DIRTY_DIRS_MAX folders. A folder
+    past the cap is not counted, so the pack's `seen` shows the files it did not account for."""
+    cnt = dict(counts or {})
+    for q in paths:
+        cnt[dirty_dir(q)] = cnt.get(dirty_dir(q), 0) + 1
+    return [{"dir": k, "n": n} for k, n in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:DIRTY_DIRS_MAX]]
+
+
 def build_pack(snap, inv_name):
-    """Bounded model-facing view, <= 8192 bytes. Trim order: commit items, watch hashes, ledger, answers, decisions, usage."""
+    """Bounded model-facing view, <= 8192 bytes. Never in it: the usage detail (per model, per job), which no judgement needs.
+    Trim order (3.6.1, commit subjects are the last optional detail to go): recent tags, watch hashes, listed changed files folded
+    into their folder counts, answer notes, decision text, ledger lines, answers, commit items; then the hard steps."""
     p = {k: snap[k] for k in ("schema", "base", "root", "facts_at")}
     p["since"] = snap.get("since")   # 13.1: the baseline the model judges against; small, never trimmed
     # 14.4: the owner's immediate objective and the standing proposal, RESERVED (placed before every optional detail, never
@@ -1817,8 +1904,12 @@ def build_pack(snap, inv_name):
                   } if isinstance(dr, dict) else None
     p.update({k: snap[k] for k in ("repos", "commits", "status", "watch", "ledger", "answers", "decisions", "usage", "watch_dropped",
                                    "dirty_paths", "template_hash")})
+    p["dirty_dirs"] = snap.get("dirty_dirs") or []   # a snapshot staged before 3.6.1 has none: its unlisted files count as not seen
     p = C.loads(C.dumps(p))   # deep copy
+    if isinstance(p.get("usage"), dict):   # 3.6.1: totals only; the per-model and per-job detail is page material, never the model's
+        p["usage"] = {k: v for k, v in p["usage"].items() if k not in ("by_model", "jobs")}
     p["schema"] = "project-map-pack-1"
+    p["rev"] = PACK_REV
     p["generation"] = inv_name
     p["key_digest"] = C.digest(snap["key"])
     p["prev_key_digest"] = C.digest(snap["prev_key"]) if snap.get("prev_key") else None
@@ -1899,10 +1990,10 @@ def build_pack(snap, inv_name):
                 if isinstance(o, dict) and C.blen(o.get("label", "")) > 60:
                     o["label"] = C.trim(o["label"], 60)
 
-    def cut_usage():
-        if p.get("usage"):
-            p["usage"] = {k: v for k, v in p["usage"].items() if k not in ("by_model", "jobs")}
-            tr["usage"] = True
+    def fold_dirty():   # every listed changed file joins its folder count: nothing is lost at folder level, so this is no cut
+        cnt = {r["dir"]: r["n"] for r in p["dirty_dirs"]}
+        p["dirty_dirs"] = dirty_dirs(p["dirty_paths"], cnt)
+        p["dirty_paths"] = []
 
     def cut_recent():
         for r in p["repos"]:
@@ -1915,13 +2006,13 @@ def build_pack(snap, inv_name):
             if isinstance(r.get("release"), dict):
                 r["release"] = {"head_tags_total": r["release"].get("head_tags_total"), "trimmed": True}
 
-    steps = [cut_recent, lambda: cut_items(5), lambda: cut_items(2), lambda: cut_items(1), lambda: cut_items(0), cut_watch,
-             cut_ledger, cut_notes, drop_answers, cut_decisions, cut_usage,
-             lambda: p.update(dirty_paths=[]), lambda: p["watch"].__setitem__(slice(40, None), []),
+    steps = [cut_recent, cut_watch, fold_dirty, cut_notes, cut_decisions, cut_ledger, drop_answers,
+             lambda: cut_items(5), lambda: cut_items(2), lambda: cut_items(1), lambda: cut_items(0),
+             lambda: p["watch"].__setitem__(slice(40, None), []),
              lambda: p["repos"].__setitem__(slice(8, None), []), lambda: p.update(watch_dropped=p["watch_dropped"][:5]),
              lambda: p["commits"].update(days=p["commits"]["days"][:3]),
              lambda: p["decisions"].__setitem__(slice(6, None), []),
-             lambda: p.update(dirty_paths=[], watch=[], watch_dropped=[], ledger=None),
+             lambda: p.update(dirty_paths=[], dirty_dirs=[], watch=[], watch_dropped=[], ledger=None),
              cut_release,
              lambda: p["answers"].update(pending=[], bad=[]),
              lambda: p["commits"].update(days=[]),
@@ -1972,7 +2063,10 @@ def compute_seen(snap, p):
     listed = {w["path"] if isinstance(w, dict) else w for w in (p.get("watch") or [])}
     moved = watch_moved_paths(snap)
     return {"commits": shown, "commits_total": (snap.get("commits") or {}).get("count", 0),
-            "dirty": len(p.get("dirty_paths") or []), "dirty_total": (snap.get("status") or {}).get("dirty", 0),
+            # 3.6.1: a changed file is seen when the pack lists it or counts it under its folder (dirty_dirs)
+            "dirty": min(len(p.get("dirty_paths") or []) + sum(r.get("n", 0) for r in p.get("dirty_dirs") or [] if isinstance(r, dict)),
+                         (snap.get("status") or {}).get("dirty", 0)),
+            "dirty_total": (snap.get("status") or {}).get("dirty", 0),
             "decisions_cut": dec_cut,
             "answers_dropped": max(0, len((snap.get("answers") or {}).get("pending") or []) - len((p.get("answers") or {}).get("pending") or [])),
             "ledger_cut": ledger_cut, "repos_cut": max(0, len(snap.get("repos") or []) - len(p.get("repos") or [])),

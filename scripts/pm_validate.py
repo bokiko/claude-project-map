@@ -1486,23 +1486,26 @@ def _release_unverified(S):
     return False
 
 
+ATT_WORD = {"unchecked": "not fully checked"}   # 3.6.1: the owner-facing word for an attention kind (the others read as they are)
+
+
 def omitted_work(seen):
     """Short phrases (<= 40 bytes) for the relevant work the judged pack left out (13.3 "Relevant work omitted")."""
     out = []
     if seen.get("commits", 0) < seen.get("commits_total", 0):
-        out.append("%d of %d commits shown to the model" % (seen["commits"], seen["commits_total"]))
+        out.append("map read %d of %d commits" % (seen["commits"], seen["commits_total"]))
     if seen.get("dirty", 0) < seen.get("dirty_total", 0):
-        out.append("%d of %d changed files shown" % (seen["dirty"], seen["dirty_total"]))
+        out.append("map read %d of %d changed files" % (seen["dirty"], seen["dirty_total"]))
     if seen.get("decisions_cut"):
-        out.append("%d decisions cut in the pack" % seen["decisions_cut"])
+        out.append("%d decisions only partly read" % seen["decisions_cut"])
     if seen.get("answers_dropped"):
-        out.append("%d answers left out of the pack" % seen["answers_dropped"])
+        out.append("%d answers not read" % seen["answers_dropped"])
     if seen.get("ledger_cut"):
-        out.append("ledger cut in the pack")
+        out.append("ledger only partly read")
     if seen.get("repos_cut"):
-        out.append("%d repos left out of the pack" % seen["repos_cut"])
+        out.append("%d repos not read" % seen["repos_cut"])
     if seen.get("watch_moved_cut"):
-        out.append("%d changed watch files not shown" % seen["watch_moved_cut"])
+        out.append("%d changed watch files not read" % seen["watch_moved_cut"])
     return [C.trim(x, 40) for x in out]
 
 
@@ -1537,7 +1540,7 @@ def assurance(S):
     if att is None:
         why.append("attention not assessed")
     elif att not in ("continue", "decision"):   # "decision" is already the first reason above
-        why.append("attention: %s" % att)
+        why.append("attention: %s" % ATT_WORD.get(att, att))
     seen = S.get("judged_seen")
     if not isinstance(seen, dict):
         why.append("pack coverage unknown")
@@ -1550,7 +1553,7 @@ def assurance(S):
     return {"ok": not why, "why": why}
 
 
-NEEDS_TEXT = {"a": "Needs you", "b": "Nothing needs you", "c": "No decision identified in the checked information"}
+NEEDS_TEXT = {"a": "Needs you", "b": "Nothing needs you", "c": "Nothing found that needs you (partial check)"}
 
 
 def needs_case(S):
@@ -1564,6 +1567,27 @@ def needs_case(S):
 def needs_text(S):
     """The ONE three-way wording (13.4) of "does anything need the owner": page pill and tile, brief, handoff."""
     return NEEDS_TEXT[needs_case(S)]
+
+
+def read_point(snap, seen, genstr):
+    """3.6.1 (16.6): the point up to which every commit was read by a judgement, {heads, generation, assessed_at}. When this
+    judgement read every commit its snapshot listed (`seen.commits >= commits.listed`; a batch larger than the snapshot lists was
+    reported by this assessment and then leaves the window), or there is no previous assessment, it is the staged heads. Otherwise
+    the window start stays where it was, so the commits nobody read are in the next window too ("" for a repository = its window
+    started at its history; J1)."""
+    cm = snap.get("commits") if isinstance(snap.get("commits"), dict) else {}
+    listed = cm.get("listed") if isinstance(cm.get("listed"), int) else 0
+    sn = snap.get("since")
+    if not isinstance(sn, dict) or (isinstance(seen, dict) and isinstance(seen.get("commits"), int) and seen["commits"] >= listed):
+        return {"heads": dict((snap.get("key") or {}).get("heads") or {}), "generation": genstr, "assessed_at": snap.get("facts_at")}
+    wh = snap.get("window_heads")
+    if not isinstance(wh, dict):   # L1: staged before 3.6.1: that window started at the judged heads it was staged against
+        pk = snap.get("prev_key")
+        wh = pk.get("heads") if isinstance(pk, dict) else None
+        if not isinstance(wh, dict) or not wh:
+            return None   # no recoverable start: write no record, so the legacy restart (since.from.generation) still applies
+        wh = {r: ("" if v is None else v) for r, v in wh.items()}
+    return {"heads": dict(wh), "generation": sn.get("generation"), "assessed_at": sn.get("assessed_at")}
 
 
 def build_state(ctx):
@@ -1635,6 +1659,10 @@ def build_state(ctx):
                     "against": fr["against"]}
     S["changes"] = diff_changes(prev, S, t) if prev else []
     S["judged_seen"] = ctx.get("judged_seen")   # what the model saw of the staged snapshot (13.3); None = unknown
+    S["judged_pack"] = ctx.get("judged_pack")   # 3.6.1: the revision of that pack (pm_collect.PACK_REV); None = before 3.6.1
+    rd = read_point(snap, S["judged_seen"], ctx["genstr"])   # 16.6: where the next commit window starts
+    if rd is not None:
+        S["read"] = rd
     S["since"] = build_since(snap, J, decs, S["judged_seen"])
     S["assurance"] = assurance(S)
     old_ids = [x["id"] for k in ("parts", "decisions") for x in (prev or {}).get(k, [])]

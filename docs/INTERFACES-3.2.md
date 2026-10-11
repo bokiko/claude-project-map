@@ -1030,3 +1030,79 @@ Problem: a criterion or a part stays "done" after the file or commit that proved
 10. `watch_moved_paths` moved to `pm_validate` (fit evidence needs it); `pm_collect.watch_moved_paths` calls it. The prompt hook's `cache.json` write takes the publish lock (15.1).
 11. (Codex round 1, I2-I5) A FULL plan's completion refs are checked on the FINAL plan; a link is never a regular file for completion evidence or its publication check; a watched symlink has no fit identity on either route; an inaccessible repository is `unknown`, only established absence is `moved`, and the pinned state's git repositories are consulted next to the collected ones. (J1) Those repositories survive judged publications (`state_repos`), so an UPDATE published while a nested repository is inaccessible cannot make the next pass call its commits missing.
 12. (Codex round 3, K1) `pack.drift.acknowledged` is a list of citable refs, not a boolean, and the agent prompt restates 15.3's conjunction instead of using `new_work` as an acknowledgement proxy. (Codex round 4, L1) The prompt also asks for fit evidence spelled exactly as the pack lists it (no line number, no `./`) and says that the same commit or path counts as acknowledged however spelled, so its rule agrees with the identity gate for every spelling fit validation accepts (DR-ack L1 checks that agreement for a bare, line-numbered and `./` file ref and for a short and full commit oid).
+
+## 16. 3.6.1: the judgement reads the commits; a later decision never waits for an answer
+
+Found live on a real map (kolibri-1, 2026-10-11): 4 new commits, 42 changed files (mostly `__pycache__` and `.backups/` copies), a
+long ledger. The 8 KB pack was over its cap, and the trim order cut the commit items FIRST (5, 2, 1, 0) while the per-model and
+per-job usage detail (about 2.9 KB, read by no judgement) and the first 20 changed files (all backup copies, by path order) stayed.
+The model judged 0 of 4 commits; every later assessment of that project was `unchecked` because the snapshot listed at most 20
+changed files, so `seen.dirty < seen.dirty_total` forever. The page then said "No decision identified in the checked information"
+and "None found" above two `ready:false` decisions rendered as cards that "wait for your answer".
+
+16.1 Pack (`pm_collect.build_pack`, `PACK_REV = 2`)
+- The usage detail (`by_model`, `jobs`) is never in the pack; the totals stay. (`trimmed.usage` stays `false`; the key is kept for shape.)
+- Changed files: `dirty` is ordered work first (stable): a file inside a hidden folder (a path component before the file name that
+  starts with `.`) or a `__pycache__` folder goes after the rest. The snapshot lists the first `DIRTY_LIST = 20` one by one
+  (`dirty_paths`, which also get the frozen fingerprints, unchanged) and counts the others per top-level folder:
+  `dirty_dirs = [{dir, n}]`, `dir` = first path component + `/` (`./` for a file at the root), most files first then by name, at
+  most `DIRTY_DIRS_MAX = 12` folders. A folder past the cap is not counted.
+- `seen.dirty` = listed + folder-counted (capped at `dirty_total`): a changed file counted under its folder is seen. Only a listed path
+  can be cited (`fit` evidence, `file:` observations), as before. A snapshot staged before 3.6.1 has no `dirty_dirs`: its unlisted
+  files stay unseen.
+- Trim order: recent tags, watch hashes, fold the listed files into their folder counts (no information about WHERE work happened is
+  lost, so it is not a cut), answer notes, decision text, ledger lines (200 bytes each), answers, then commit items (5, 2, 1, 0),
+  then the hard steps as before (the final clear now empties `dirty_dirs` too). Commit subjects are the last optional detail to go.
+- `pack.rev = PACK_REV`. Embed records the revision of the pack the model READ as `state.judged_pack` (a pack without `rev`: 1).
+  A mechanical refresh keeps it, like `judged_seen`.
+
+16.2 One re-judgement after a blind one (`project-map-facts.decide`)
+- After the key, unverified and consistency checks and before every refresh reason: when `judged_seen` names omitted work
+  (`omitted_work` non-empty) and `judged_pack` is missing or below `PACK_REV` (`rejudge_cut`), the verdict is
+  `NEEDS_JUDGEMENT previous assessment read only part of the changes`. Under partial watch coverage (which otherwise answers
+  `NEEDS_REFRESH coverage partial`) the same verdict is given when no key moved, the generation verifies and is consistent:
+  a hash pass that stays partial must not postpone it forever (Codex 3.6.1 r1, I2). The judgement it causes records the current revision, so
+  this happens at most once per map per pack revision; a cut read with the current revision is never redone by this rule.
+
+16.3 Page (`project-map-template.html`)
+- Only a decision that needs the owner (open or overdue, `ready` not false) is a card under the current phase. A `ready:false`
+  decision is listed in a disclosure `Later decisions (n, not asked yet)` right after the Handoff (which stays first, 14.5) with the hint `Not asked yet` (plus
+  ` · will need your explicit answer` for a hard rule); it is never worded "Waits for your answer". The pill, the tile and the
+  brief already counted only ready decisions.
+- The plan table names a phase by its position in the phase list (`01`, `02`, ...) instead of its id, matching the phase list.
+
+16.4 Words (owner-facing only; kinds, keys and the model's contract are unchanged)
+- Case (c): `Nothing found that needs you (partial check)` (was "No decision identified in the checked information").
+- Assurance reasons: `map read k of n commits`, `map read k of n changed files`, `n decisions only partly read`, `n answers not read`,
+  `ledger only partly read`, `n repos not read`, `n changed watch files not read`; attention kind `unchecked` reads
+  `attention: not fully checked` (other kinds as they are).
+- Page: `the map read k of n commits` on the since line; `Attention · not fully checked`; a landed change reads
+  `committed, not verified yet` on the page and in the brief and handoff (was "landed, not checked (by the map)").
+- Agent prompt: `dirty_dirs` explained; every text is read by the owner, so never "pack", "dirty paths" or "ledger cut".
+
+16.6 The commit window holds until read (Codex 3.6.1 r1, I1)
+- Every judged publication writes `state.read = {heads, generation, assessed_at}` (`pm_validate.read_point`): the staged heads when
+  the judgement read every commit its snapshot listed (`judged_seen.commits >= commits.listed`) or there is no previous
+  assessment; otherwise the window start the staging used (`snapshot.window_heads`, `since.generation`, `since.assessed_at`).
+  A snapshot staged before 3.6.1 has no `window_heads`: its window started at the staged `prev_key.heads` (null = `""`), which
+  is used; with no `prev_key` either, no `read` is written, so the legacy restart below still applies (Codex 3.6.1 r4, L1).
+  A mechanical refresh keeps it. A batch larger than the snapshot lists (`MAX_COMMITS`) is reported by that assessment
+  ("map read 40 of 60 commits") and then leaves the window, as before.
+- `pm_collect.window_base`: when `state.read.heads` differs from the judged heads, the next commit window starts there (per
+  repository; `snapshot.window_heads` names every repository, `""` = its window started at its history (a repository new in that
+  window, or a folder that became a Git repository), and a repository a held start does not name also starts at its history,
+  never at its judged head: Codex 3.6.1 r2, J1) and `since` is measured from `read.generation`/`assessed_at`, so
+  `since.commits`, `seen.commits_total` and the assurance count the unread commits until a judgement reads them. Nothing about
+  them is cleared by a complete fresh window or by the revision advancing.
+- A state from before 3.6.1 has no `read`: when its `judged_seen.commits` is below its own `commits.listed`, the window restarts
+  at the judged heads of `since.from.generation` (a null head, a plain folder or an unborn repository, is the history start `""`:
+  Codex 3.6.1 r3, K1), provided that generation is still on disk and verifies (else the ordinary
+  window; the earlier assessment already reported what it did not read). This is how the one re-judgement of 16.2 sees the
+  commits the blind judgement missed.
+
+16.5 Tests: `FX-pack` (folder counts, work first, every commit subject kept while the ledger is cut, revision, no usage detail),
+`FX-rejudge` (once for an older revision, never again, never for the current revision or an uncut read; also under partial
+coverage), `FX-window` (the window holds until read, moves on after, a new nested repository, a folder that becomes Git, legacy
+restart and its fallbacks (generation gone, generation tampered), read_point), `FX-page` (later
+decisions, the hint, the count, the plan table numbering). The wording assertions of earlier sections were updated to the new
+phrases (only wording; no expected value changed otherwise).

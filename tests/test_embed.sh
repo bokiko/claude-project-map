@@ -974,7 +974,7 @@ PY
 out=$(facts); t_pre "E-pack stress: verdict printed" "$out" "NEEDS_JUDGEMENT"; STAGE="$PM/inv-${out##* }"
 t_true "E-pack stress: pack.json <= 8192 bytes" "[ \$(wc -c < $STAGE/pack.json) -le 8192 ]"
 t_eq "E-pack stress: snapshot keeps the complete record (120 dirty, 600 bad answer lines)" "$(get "$STAGE/snapshot.json" '(d["status"]["dirty"],len(d["answers"]["bad"]))')" "(121, 600)"
-t_eq "E-pack stress: trimmed counters are set (items, ledger, answers)" "$(get "$STAGE/pack.json" '(d["trimmed"]["items"]>0, d["trimmed"]["ledger"], d["trimmed"]["answers"]>=0)')" "(True, True, True)"
+t_eq "E-pack stress: trimmed counters are set (ledger, answers); 3.6.1: every listed commit subject is kept (commit items go last)" "$(get "$STAGE/pack.json" '(d["trimmed"]["items"], d["seen"]["commits"], d["trimmed"]["ledger"], d["trimmed"]["answers"]>=0)')" "(0, 40, True, True)"
 t_eq "E-pack stress: commits count in the snapshot is the true incremental count" "$(get "$STAGE/snapshot.json" 'd["commits"]["count"]')" 150
 t_eq "E-pack stress: flagged commits among the 40 listed" "$(get "$STAGE/snapshot.json" '(d["commits"]["listed"],d["commits"]["flagged"])')" "(40, 40)"
 t_eq "E-pack stress: pack still has the generation stamp and digests" "$(get "$STAGE/pack.json" '(d["generation"]=="'"inv-${out##* }"'", len(d["key_digest"]))')" "(True, 12)"
@@ -2782,7 +2782,7 @@ rej "RB-landed-ref: uncommitted with a ref outside the project" 'J["since"]["cha
 pub 'J["since"]["changes"]=[{"text":"Import landed; nothing here shows it works","state":"landed","ref":"commit:'"$SHA7"'"},{"text":"Plan edits are not committed yet","state":"uncommitted","ref":"file:PLAN.md"},{"text":"Scratch notes added","state":"uncommitted"}]'
 t_pre "RB-landed-ref: a landed commit, an uncommitted file and a bare uncommitted change publish" "$eo" "PM_EMBED_OK"
 t_eq "RB-landed-ref: ... all three are stored verbatim, most consequential first" "$(S '[(c["state"], c.get("ref")) for c in d["since"]["changes"]]')" "[('landed', 'commit:$SHA7'), ('uncommitted', 'file:PLAN.md'), ('uncommitted', None)]"
-t_has "RB-landed-ref: the brief says 'landed, not checked' and never 'checked' alone" "$(cat "$PM/brief.txt")" "- Import landed; nothing here shows it works · landed, not checked"
+t_has "RB-landed-ref: the brief says 'committed, not verified yet' and never 'checked' alone" "$(cat "$PM/brief.txt")" "- Import landed; nothing here shows it works · committed, not verified yet"
 t_has "RB-landed-ref: ... and 'uncommitted' for the working-tree work" "$(cat "$PM/brief.txt")" "- Plan edits are not committed yet · uncommitted"
 # a project without git: landed may point at a file (that is all the evidence there is)
 rm -rf "$T/rbng"; mkdir -p "$T/rbng"; R=$(cd "$T/rbng" && pwd -P); PM="$R/.project-map"; seq 1 300 > "$R/PLAN.md"; seq 1 200 > "$R/REVIEW-LOG.md"; echo r > "$R/README.md"
@@ -2840,14 +2840,14 @@ pub ''
 t_pre "RB-seen: the judgement publishes" "$eo" "PM_EMBED_OK"
 t_eq "RB-seen: state.judged_seen is the seen of STAGE/pack.json" "$(S 'json.dumps(d["judged_seen"], sort_keys=True)')" "$SEEN0"
 t_eq "RB-seen: since.listed equals the retained commit count" "$(S 'd["since"]["listed"]')" "$(get "$STAGE/pack.json" 'd["seen"]["commits"]')"
-t_has "RB-seen: assurance says how many commits the model saw" "$(S 'd["assurance"]["why"]')" "of 60 commits shown to the model"
+t_has "RB-seen: assurance says how many commits the model saw" "$(S 'd["assurance"]["why"]')" "of 60 commits"
 t_eq "RB-seen: ... and the assessment is not ok" "$(S 'd["assurance"]["ok"]')" "False"
 t_has "RB-seen: brief line 7 carries '<listed> of 60 shown'" "$(grep '^since ' "$PM/brief.txt")" "of 60 shown"
-t_has "RB-seen: brief line 2 carries the qualifier (nothing needs the owner, but the model saw part of the work)" "$(sed -n 2p "$PM/brief.txt")" "· current · $(get "$STAGE/pack.json" 'd["seen"]["commits"]') of 60 commits shown to the model"
+t_has "RB-seen: brief line 2 carries the qualifier (nothing needs the owner, but the model saw part of the work)" "$(sed -n 2p "$PM/brief.txt")" "· current · map read $(get "$STAGE/pack.json" 'd["seen"]["commits"]') of 60 commits"
 if [ $HAVE_NODE = 1 ]; then
   rbpage
-  t_eq "RB-seen: the page says 'N of 60 shown to the model'" "$(pj '[x for x in d["since"] if " of 60 shown to the model" in x]')" "['60 commits · 0 uncommitted files · $(get "$STAGE/pack.json" 'd["seen"]["commits"]') of 60 shown to the model']"
-  t_eq "RB-seen: ... and the pill is the incomplete-assessment wording, not the denial" "$(pj 'd["pill"]')" "No decision identified in the checked information"
+  t_eq "RB-seen: the page says 'the map read N of 60 commits'" "$(pj '[x for x in d["since"] if " of 60 commits" in x and "map read" in x]')" "['60 commits · 0 uncommitted files · the map read $(get "$STAGE/pack.json" 'd["seen"]["commits"]') of 60 commits']"
+  t_eq "RB-seen: ... and the pill is the incomplete-assessment wording, not the denial" "$(pj 'd["pill"]')" "Nothing found that needs you (partial check)"
 fi
 # a publication that goes through the late-answer path still keeps the seen of the pack the model read
 mkproj rbs2 "$(ovraise "$RW_TP,$RW_SY" "$RB_RDY2")" || true
@@ -2959,7 +2959,7 @@ for k, v in (("commits", 12), ("dirty", 3), ("decisions_cut", 2), ("answers_drop
 print(json.dumps(out))
 PYEOF
 upd ''
-t_eq "RB-seen-units: each field of seen alone makes the assurance not ok, with a reason of at most 40 bytes" "$(python3 -I "$T/rb_unit2.py" "$HOOKS" "$PM/state.json")" '[true, ["commits", false, "12 of 30 commits shown to the model", true], ["dirty", false, "3 of 9 changed files shown", true], ["decisions_cut", false, "2 decisions cut in the pack", true], ["answers_dropped", false, "1 answers left out of the pack", true], ["ledger_cut", false, "ledger cut in the pack", true], ["repos_cut", false, "2 repos left out of the pack", true], ["watch_moved_cut", false, "1 changed watch files not shown", true]]'
+t_eq "RB-seen-units: each field of seen alone makes the assurance not ok, with a reason of at most 40 bytes" "$(python3 -I "$T/rb_unit2.py" "$HOOKS" "$PM/state.json")" '[true, ["commits", false, "map read 12 of 30 commits", true], ["dirty", false, "map read 3 of 9 changed files", true], ["decisions_cut", false, "2 decisions only partly read", true], ["answers_dropped", false, "1 answers not read", true], ["ledger_cut", false, "ledger only partly read", true], ["repos_cut", false, "2 repos not read", true], ["watch_moved_cut", false, "1 changed watch files not read", true]]'
 
 # ---- RB-assurance: ONE predicate; each clause flips ok; the three-way wording in the page and the brief
 mkproj rba || true
@@ -2972,7 +2972,7 @@ t_eq "RB-assurance: a ready open decision -> not ok, case a, 'Needs you'" "$(axq
 ax 'd["decisions"][0]["ready"]=False'
 t_eq "RB-assurance: ready:false does not count as a decision open" "$(axq 'd["assurance"]["ok"]')" "True"
 ax 'd["stale"]={"judged_at":"x","commits_since":2,"why":"2 new commits"}'
-t_eq "RB-assurance: stale -> not ok: case c, the reason names the stale why" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(False, ['assessment behind: 2 new commits'], 'c', 'No decision identified in the checked information')"
+t_eq "RB-assurance: stale -> not ok: case c, the reason names the stale why" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(False, ['assessment behind: 2 new commits'], 'c', 'Nothing found that needs you (partial check)')"
 ax 'd["coverage"]["coverage"]="partial"'
 t_eq "RB-assurance: partial coverage -> not ok" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['coverage partial'])"
 ax 'd["repos"][0]["release"].setdefault("key", {})["unverified"]=True'
@@ -2984,11 +2984,11 @@ t_eq "RB-assurance: a git error -> not ok" "$(axq '(d["assurance"]["ok"], d["ass
 ax 'd["since"]["attention"]["kind"]="waiting"'
 t_eq "RB-assurance: attention waiting -> not ok" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['attention: waiting'])"
 ax 'd["since"]["attention"]["kind"]="unchecked"'
-t_eq "RB-assurance: attention unchecked -> not ok" "$(axq 'd["assurance"]["why"]')" "['attention: unchecked']"
+t_eq "RB-assurance: attention unchecked -> not ok" "$(axq 'd["assurance"]["why"]')" "['attention: not fully checked']"
 ax 'd["since"]=None'
 t_eq "RB-assurance: no attention block at all -> not ok (never assessed)" "$(axq 'd["assurance"]["why"]')" "['attention not assessed']"
 ax 'd["judged_seen"]["commits_total"]=30; d["judged_seen"]["commits"]=12'
-t_eq "RB-assurance: 12 of 30 commits shown -> not ok, with the number" "$(axq 'd["assurance"]["why"]')" "['12 of 30 commits shown to the model']"
+t_eq "RB-assurance: 12 of 30 commits shown -> not ok, with the number" "$(axq 'd["assurance"]["why"]')" "['map read 12 of 30 commits']"
 ax 'd["judged_seen"]=None'
 t_eq "RB-assurance: unknown pack coverage -> not ok" "$(axq 'd["assurance"]["why"]')" "['pack coverage unknown']"
 ax 'del d["since"]; del d["judged_seen"]; del d["assurance"]'
@@ -3009,9 +3009,9 @@ if [ $HAVE_NODE = 1 ]; then
   t_eq "RB-assurance page: ok -> 'Nothing needs you', tile 'Nothing'" "$(pj '(d["error"], d["pill"], d["count"], d["note"])')" "(None, 'Nothing needs you', 'Nothing', '')"
   rbpage '{"decisions":[{"id":"D-001","status":"open","q":"Q?","options":[{"id":"A","label":"a"}],"default":"hold","ready":true}],"stale":{"judged_at":"x","commits_since":1,"why":"1 new commits"},"assurance":{"ok":false,"why":["decision open","assessment behind: 1 new commits"]}}'
   t_eq "RB-assurance page: a ready decision + stale -> 'Needs you', tile 1 decision, stale line kept, never the denial" "$(pj '(d["pill"], d["count"], d["note"], d["stale"])')" "('Needs you', '1', 'decision', ['Assessment may be out of date · 1 new commits'])"
-  rbpage '{"assurance":{"ok":false,"why":["coverage partial","12 of 30 commits shown to the model","attention: waiting"]}}'
-  t_eq "RB-assurance page: none open + not ok -> the incomplete wording, tile lists the first two reasons" "$(pj '(d["pill"], d["count"], d["note"])')" "('No decision identified in the checked information', 'None found', 'coverage partial · 12 of 30 commits shown to the model')"
-  t_has "RB-assurance page: ... and the snapshot lists every reason" "$(pj '[r for r in d["snapshot"] if r[0]=="Assurance"]')" "coverage partial · 12 of 30 commits shown to the model · attention: waiting"
+  rbpage '{"assurance":{"ok":false,"why":["coverage partial","map read 12 of 30 commits","attention: waiting"]}}'
+  t_eq "RB-assurance page: none open + not ok -> the incomplete wording, tile lists the first two reasons" "$(pj '(d["pill"], d["count"], d["note"])')" "('Nothing found that needs you (partial check)', 'None found', 'coverage partial · map read 12 of 30 commits')"
+  t_has "RB-assurance page: ... and the snapshot lists every reason" "$(pj '[r for r in d["snapshot"] if r[0]=="Assurance"]')" "coverage partial · map read 12 of 30 commits · attention: waiting"
   rbpage '{"assurance":null,"stale":{"judged_at":"x","commits_since":1,"why":"1 new commits"}}'
   t_eq "RB-assurance page: a state without assurance (before 3.4) keeps the earlier pill" "$(pj 'd["pill"]')" "Assessment may be out of date"
 fi
@@ -3103,7 +3103,7 @@ for pad in range(1, 900):
             gone[name] = pad
 order = [n for n, _ in sorted(gone.items(), key=lambda kv: kv[1])]
 full = lines(1)
-print(json.dumps([order, len(gone) == len(MARK), [x for x in full if x.startswith("- ")] == ["- Change 1 is about this · landed, not checked", "- Change 2 is about this · uncommitted", "- Change 3 is about this · uncommitted"],
+print(json.dumps([order, len(gone) == len(MARK), [x for x in full if x.startswith("- ")] == ["- Change 1 is about this · committed, not verified yet", "- Change 2 is about this · uncommitted", "- Change 3 is about this · uncommitted"],
                   full.index(next(x for x in full if x.startswith("attention:"))) < full.index(next(x for x in full if x.startswith("next:"))) < full.index(next(x for x in full if x.startswith("since "))) < full.index(next(x for x in full if x.startswith("- Change 1"))) < full.index(next(x for x in full if "overtaken" in x)) < full.index(next(x for x in full if x.startswith("git:"))) < full.index(next(x for x in full if x.startswith("stale:"))) < full.index(next(x for x in full if x.startswith("tokens")))]))
 PYEOF
 t_eq "RB-brief-max: the drop order is exact: tokens, git, change 3, 2, 1, since, attention, overtaken, coverage, stale (and the display order holds)" "$(python3 -I "$T/rb_unit3.py" "$HOOKS" "$PM/state.json")" '[["tokens", "git", "change3", "change2", "change1", "since", "attention", "overtaken", "coverage", "stale"], true, true, true]'
@@ -3126,7 +3126,7 @@ if [ $HAVE_NODE = 1 ]; then
   t_eq "RB-page: the page script ran without error and the section is shown" "$(pj '(d["error"], d["sinceHidden"])')" "(None, False)"
   t_has "RB-page: eyebrow: Since the previous assessment · <date>" "$(pj 'd["since"][0]')" "Since the previous assessment · 20"
   t_eq "RB-page: the count line is '<N> commits · <M> uncommitted files'" "$(pj 'd["since"][1]')" "0 commits · 1 uncommitted files"
-  t_eq "RB-page: the attention row, the focus row (3.5.0), the fit row (3.6.0, under the focus row) and both change rows" "$(pj 'd["since"][2:7]')" "['Attention · continue | Work can continue without the owner | Nothing is blocked on you', 'focus: Ship the engine import (proposed, not confirmed)', 'fit: not judged', '<script>alert(1)</script> landed | landed, not checked by the map', 'Plan <b>edited</b> | uncommitted']"
+  t_eq "RB-page: the attention row, the focus row (3.5.0), the fit row (3.6.0, under the focus row) and both change rows" "$(pj 'd["since"][2:7]')" "['Attention · continue | Work can continue without the owner | Nothing is blocked on you', 'focus: Ship the engine import (proposed, not confirmed)', 'fit: not judged', '<script>alert(1)</script> landed | committed, not verified yet', 'Plan <b>edited</b> | uncommitted']"
   t_eq "RB-page: not checked: ..." "$(pj 'd["since"][7]')" "not checked: <img src=x onerror=alert(1)>"
   t_eq "RB-page: the text from the repository stayed text: no script or iframe element was ever created" "$(pj '(d["scripts"], "img" in d["created"], "script" in d["created"])')" "(0, False, False)"
   mkproj rbp0 || true
@@ -3176,10 +3176,10 @@ eo=$(embed "$INVN")
 t_eq "RB-reconcile: both answered, none left: the attention is the unchecked fallback" "$(S '(d["since"]["attention"]["kind"], "id" in d["since"]["attention"], d["since"]["attention"]["text"], d["since"]["attention"]["why"], d["since"]["attention"]["by"], d["since"]["attention_judged"]["id"])')" "('unchecked', False, 'D-001 was answered after the assessment; attention not reassessed', 'pending the next judgement', 'script', 'D-001')"
 t_has "RB-reconcile: ... the brief says so" "$(cat "$PM/brief.txt")" "attention: D-001 was answered after the assessment; attention not reassessed · pending the next judgement"
 t_not "RB-reconcile: ... and no D line for the answered decisions" "$(cat "$PM/brief.txt")" "needs you:"
-t_eq "RB-reconcile: ... the assurance names the unchecked attention" "$(S 'd["assurance"]["why"]')" "['attention: unchecked']"
+t_eq "RB-reconcile: ... the assurance names the unchecked attention" "$(S 'd["assurance"]["why"]')" "['attention: not fully checked']"
 if [ $HAVE_NODE = 1 ]; then
   rbpage
-  t_eq "RB-reconcile: the page shows the unchecked row, never an answered id as current" "$(pj '(d["attention"], d["pill"], d["since"][2])')" "(['unchecked'], 'No decision identified in the checked information', 'Attention · unchecked | D-001 was answered after the assessment; attention not reassessed | pending the next judgement')"
+  t_eq "RB-reconcile: the page shows the unchecked row, never an answered id as current" "$(pj '(d["attention"], d["pill"], d["since"][2])')" "(['unchecked'], 'Nothing found that needs you (partial check)', 'Attention · not fully checked | D-001 was answered after the assessment; attention not reassessed | pending the next judgement')"
 fi
 # a decision the judgement itself flips to ready is not forcing (the STAGED flag decides) and is picked up at publication
 mkproj rbr5 || true
@@ -3213,11 +3213,11 @@ S["since"]["attention"] = {"kind": "continue", "text": "x", "why": "y"}
 S["stale"] = None; S["coverage"] = {"coverage": "complete", "covered": 1, "total": 1}
 S["assurance"] = V.assurance(S)
 q = R.brief(S).splitlines()[1].split(" \u00b7 ", 2)[2]
-print(json.dumps([p["watch"], seen["watch_moved"], seen["watch_moved_cut"], len(json.dumps(p)) <= 8192, S["assurance"], q.startswith("current"), q.endswith("1 changed watch files not shown")]))
+print(json.dumps([p["watch"], seen["watch_moved"], seen["watch_moved_cut"], len(json.dumps(p)) <= 8192, S["assurance"], q.startswith("current"), q.endswith("1 changed watch files not read")]))
 PYEOF
 mkproj rbw || true; upd ''
 bump; begin
-t_eq "RB-watch-omitted: only a watched file moved, the cap dropped the whole watch list: cut counted, assurance false, qualifier shown" "$(python3 -I "$T/rb_unit4.py" "$HOOKS" "$STAGE/snapshot.json" "$PM/state.json")" '[[], 1, 1, true, {"ok": false, "why": ["1 changed watch files not shown"]}, true, true]'
+t_eq "RB-watch-omitted: only a watched file moved, the cap dropped the whole watch list: cut counted, assurance false, qualifier shown" "$(python3 -I "$T/rb_unit4.py" "$HOOKS" "$STAGE/snapshot.json" "$PM/state.json")" '[[], 1, 1, true, {"ok": false, "why": ["1 changed watch files not read"]}, true, true]'
 
 # ---- RB-pubwatch: a path the judgement adds to `watch` is hashed at publication; an incomplete check is partial coverage
 mkproj rbpw || true; upd ''
@@ -3230,7 +3230,7 @@ t_eq "RB-pubwatch: the added path's hash is partial in the judged key" "$(S 'd["
 t_eq "RB-pubwatch: published coverage is partial and counts the unchecked file" "$(S '(d["coverage"]["coverage"], d["coverage"]["covered"], d["coverage"]["total"])')" "$(python3 -c "import sys; c,t=eval(sys.argv[1]); print(('partial', c, t+1))" "$cov0")"
 t_eq "RB-pubwatch: the assurance is not ok, wording case c" "$(S '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['coverage partial'])"
 t_eq "RB-pubwatch: brief line 2 carries the coverage qualifier" "$(sed -n 2p "$PM/brief.txt" | sed 's/.* · //')" "coverage partial"
-if [ "$HAVE_NODE" = 1 ]; then rbpage; t_eq "RB-pubwatch: the page pill says no decision identified" "$(pj 'd["pill"]')" "No decision identified in the checked information"; fi
+if [ "$HAVE_NODE" = 1 ]; then rbpage; t_eq "RB-pubwatch: the page pill says no decision identified" "$(pj 'd["pill"]')" "Nothing found that needs you (partial check)"; fi
 # an added DIRECTORY whose walk is cut before it finds a file: hash partial with nothing counted (0 of 0); the partial hash
 # alone must make the coverage partial
 upd ''
@@ -3243,7 +3243,7 @@ t_eq "RB-pubwatch-dir: the added directory's hash is partial" "$(S 'd["judged_ke
 t_eq "RB-pubwatch-dir: counts unchanged (0 of 0 added), coverage partial" "$(S '(d["coverage"]["coverage"], d["coverage"]["covered"], d["coverage"]["total"])')" "$(python3 -c "import sys; c,t=eval(sys.argv[1]); print(('partial', c, t))" "$cov0")"
 t_eq "RB-pubwatch-dir: the assurance is not ok" "$(S '(d["assurance"]["ok"], d["assurance"]["why"])')" "(False, ['coverage partial'])"
 t_eq "RB-pubwatch-dir: brief line 2 carries the coverage qualifier" "$(sed -n 2p "$PM/brief.txt" | sed 's/.* · //')" "coverage partial"
-if [ "$HAVE_NODE" = 1 ]; then rbpage; t_eq "RB-pubwatch-dir: the page pill says no decision identified" "$(pj 'd["pill"]')" "No decision identified in the checked information"; fi
+if [ "$HAVE_NODE" = 1 ]; then rbpage; t_eq "RB-pubwatch-dir: the page pill says no decision identified" "$(pj 'd["pill"]')" "Nothing found that needs you (partial check)"; fi
 # another added path hashed in time keeps the coverage complete and the counts truthful
 bump; begin
 cov0=$(get "$STAGE/snapshot.json" '(d["status"]["covered"], d["status"]["total"])')
@@ -3732,7 +3732,7 @@ mkproj fca || true; upd ''
 ax ''
 t_eq "FC-assessed: a complete map with no accepted record has no focus reason" "$(axq 'd["assurance"]["why"]')" "[]"
 ax 'd["intent"]["accepted"]={"outcome":"x","done_when":"y","exclusions":[],"hash":"0000000000000000","at":None,"line":1}'
-t_eq "FC-assessed: an accepted record that is not the served intention -> not ok, 'focus changed after the assessment', case c" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(False, ['focus changed after the assessment'], 'c', 'No decision identified in the checked information')"
+t_eq "FC-assessed: an accepted record that is not the served intention -> not ok, 'focus changed after the assessment', case c" "$(axq '(d["assurance"]["ok"], d["assurance"]["why"], d["case"], d["text"])')" "(False, ['focus changed after the assessment'], 'c', 'Nothing found that needs you (partial check)')"
 ax 'd["intent"]["accepted"]=dict(d["intent"]["target"], at=None, line=1)'
 t_eq "FC-assessed: ... an accepted record equal to the target is fine" "$(axq 'd["assurance"]["why"]')" "[]"
 ax 'del d["intent"]'
@@ -3745,7 +3745,7 @@ t_has "FC-assessed: brief line 2 carries the reason when nothing else needs the 
 mkproj fcp2 || true; bump; begin; pub ''
 if [ $HAVE_NODE = 1 ]; then
   rbpage
-  t_eq "FC-page: the page script ran; the first disclosure of the context list is Handoff" "$(pj '(d["error"], d["disclosures"][:2])')" "(None, ['Handoff', 'Plan vs shipped'])"
+  t_eq "FC-page: the page script ran; the first disclosure of the context list is Handoff" "$(pj '(d["error"], [x for x in d["disclosures"] if not x.startswith("Later decisions")][:2])')" "(None, ['Handoff', 'Plan vs shipped'])"
   t_eq "FC-page: ... its <pre> holds exactly handoff.txt" "$(pj 'd["handoff"] == open("'"$PM"'/handoff.txt", encoding="utf-8").read()')" "True"
   t_eq "FC-page: ... the focus row under the attention row says the proposal is not confirmed" "$(pj '(d["focus"], d["since"][2].startswith("Attention"), d["since"][3])')" "([['proposed', 'focus: Ship the engine import (proposed, not confirmed)']], True, 'focus: Ship the engine import (proposed, not confirmed)')"
   t_eq "FC-page: ... the section is still hidden on a first map (its focus is in the Handoff only)" "$(mkproj fcp3 >/dev/null 2>&1; rbpage; pj '(d["sinceHidden"], d["focus"], d["disclosures"][0], "Focus (proposed, not confirmed): Ship the engine import" in d["handoff"])')" "(True, [], 'Handoff', True)"
@@ -4799,6 +4799,175 @@ rm -rf "$R/repo2"; begin
 t_has "DR-repo-unreadable: control: the repository is really gone -> the commit is a loss to repair" "$out" "completion evidence lost: P1.c3"
 t_eq "DR-repo-unreadable: ... why: repo moved" "$(get "$STAGE/snapshot.json" '[(e["id"], e["why"]) for e in d["evidence"]["lost"]]')" "[('P1.c3', 'repo moved')]"
 else echo "SKIP DR-repo-unreadable (running as root)"; fi
+
+# ======================================================================================================
+# 17. 3.6.1: the model reads the commits; a later decision never waits for an answer (FX-*)
+# ======================================================================================================
+# ---- FX-pack: changed files counted per folder (work first), usage detail never in the pack, commit subjects the last optional cut
+mkrepo fxp; begin; pub "" full
+mkdir -p "$R/.backups/old" "$R/work/a" "$R/src"
+for i in $(seq 1 25); do echo b > "$R/.backups/old/backup-copy-$i.md"; done
+for i in $(seq 1 12); do echo w > "$R/work/a/work-$i.md"; done
+for i in $(seq 1 9); do echo s > "$R/src/s$i.py"; done
+for i in 1 2 3 4; do (cd "$R" && echo "$i" >> docs/a.md && git add docs/a.md && git commit -qm "work step $i"); done
+begin
+t_pre "FX-pack: setup: 4 commits and 46 changed files -> a judgement" "$out" "NEEDS_JUDGEMENT"
+t_eq "FX-pack: every changed file is seen: 20 listed one by one, the other 26 counted under their folder" "$(get "$STAGE/pack.json" '(d["seen"]["dirty"], d["seen"]["dirty_total"], len(d["dirty_paths"]), sum(r["n"] for r in d["dirty_dirs"]))')" "(46, 46, 20, 26)"
+t_eq "FX-pack: work first: no file of a hidden folder is listed while work files are left; they are counted" "$(get "$STAGE/pack.json" '([p for p in d["dirty_paths"] if p.startswith(".")], [r for r in d["dirty_dirs"] if r["dir"]==".backups/"])')" "([], [{'dir': '.backups/', 'n': 25}])"
+t_eq "FX-pack: all 4 commit subjects, nothing cut, the pack revision, no usage detail" "$(get "$STAGE/pack.json" '(d["seen"]["commits"], d["seen"]["commits_total"], d["trimmed"]["items"], d["seen"]["ledger_cut"], d["rev"], "by_model" in (d.get("usage") or {}), "jobs" in (d.get("usage") or {}))')" "(4, 4, 0, False, 2, False, False)"
+t_eq "FX-pack: unit: a snapshot WITH usage detail (per model, per job): the pack keeps the totals, never the detail" "$(python3 -c '
+import json, sys; sys.path.insert(0, sys.argv[1]); import pm_collect as K
+snap = json.load(open(sys.argv[2]))
+snap["usage"] = {"at": "2026-10-11T10:00:00+03:00", "approximate": False, "totals": {"all": 5, "jobs": 1},
+                 "by_model": [{"model": "m", "total": 5, "jobs": 1}], "jobs": [{"label": "j", "model": "m", "in": 1, "out": 1, "cache": 3}]}
+p = K.build_pack(snap, "inv-fxunit")
+print(sorted(p["usage"]), p["trimmed"]["usage"])' "$HOOKS" "$STAGE/snapshot.json")" "['approximate', 'at', 'totals'] False"
+pub "" update; t_pre "FX-pack: ... published" "$eo" "PM_EMBED_OK"
+t_eq "FX-pack: ... the assurance names no omitted work (nothing was cut)" "$(S '[w for w in d["assurance"]["why"] if "map read" in w or "partly read" in w or "not read" in w]')" "[]"
+python3 -c 'import sys
+L = "\n".join("- line %d %s" % (i, "x" * 180) for i in range(12))
+open(sys.argv[1], "w").write("## Goal\n%s\n## Now\n%s\n## Next action\n%s\n## Blockers\n%s\n" % (L, L, L, L))' "$R/thoughts/ledgers/demo-engine.md"
+for i in 5 6 7 8; do (cd "$R" && echo "$i" >> docs/a.md && git add docs/a.md && git commit -qm "work step $i"); done
+begin
+t_eq "FX-pack: a 9 KB ledger: the listed files fold into folder counts (no cut), the ledger is cut, every commit subject stays" "$(get "$STAGE/pack.json" '(len(d["dirty_paths"]), d["seen"]["dirty"], d["seen"]["dirty_total"], d["seen"]["ledger_cut"], d["seen"]["commits"], d["seen"]["commits_total"], d["trimmed"]["items"], sorted(i["s"] for x in d["commits"]["days"] for i in x["items"]))')" "(0, 47, 47, True, 4, 4, 0, ['work step 5', 'work step 6', 'work step 7', 'work step 8'])"
+t_true "FX-pack: ... pack <= 8192 bytes" "[ \$(wc -c < $STAGE/pack.json) -le 8192 ]"
+t_eq "FX-pack: unit: hidden-folder rank and folder names" "$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import pm_collect as K;print([K.dirty_rank(p) for p in ("a.md",".env","src/x.py",".b/x.md","src/__pycache__/x.pyc","src/.cache/y")], [K.dirty_dir(p) for p in ("a.md","src/x/y.py")], K.dirty_dirs(["a/1","b/1","a/2","c"], {"b/": 2}))' "$HOOKS")" "[0, 0, 0, 1, 1, 1] ['./', 'src/'] [{'dir': 'b/', 'n': 3}, {'dir': 'a/', 'n': 2}, {'dir': './', 'n': 1}]"
+
+# ---- FX-rejudge: a judgement that read a cut pack of an older pack revision is redone ONCE; never for the current revision
+mkrepo fxr; begin; pub "" full
+lib mut "$PM/current/state.json" 'd["judged_seen"]=dict(d["judged_seen"], commits=0, commits_total=4); d.pop("judged_pack", None)'; lib resign "$PM/current"
+out=$(facts); t_pre "FX-rejudge: the last judgement read 0 of 4 commits from a pack before 3.6.1 -> one judgement" "$out" "NEEDS_JUDGEMENT previous assessment read only part of the changes inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"; pub "" update; t_pre "FX-rejudge: ... published" "$eo" "PM_EMBED_OK"
+t_eq "FX-rejudge: ... the new state records the pack revision the model read" "$(S 'd["judged_pack"]')" "2"
+out=$(facts); t_not "FX-rejudge: ... and the next run does not judge again" "$out" "NEEDS_JUDGEMENT"
+lib mut "$PM/current/state.json" 'd["judged_seen"]=dict(d["judged_seen"], commits=0, commits_total=4)'; lib resign "$PM/current"
+out=$(facts); t_not "FX-rejudge: a cut read with the current revision is not redone (once per revision, bounded)" "$out" "NEEDS_JUDGEMENT"
+lib mut "$PM/current/state.json" 'd["judged_seen"]=dict(d["judged_seen"], commits=0, commits_total=0, dirty=0, dirty_total=0, ledger_cut=False); d.pop("judged_pack", None)'; lib resign "$PM/current"
+out=$(facts); t_not "FX-rejudge: an older revision that cut nothing is not redone" "$out" "NEEDS_JUDGEMENT"
+
+# ---- FX-window: a commit leaves the window only once a judgement read every commit its snapshot listed (16.6)
+mkrepo fxw; begin; pub "" full
+t_eq "FX-window: a first map reads from its own heads" "$(S 'd["read"]["heads"] == d["judged_key"]["heads"] and d["read"]["generation"] == d["generation"]')" "True"
+for i in 1 2 3; do (cd "$R" && echo "$i" >> docs/a.md && git add docs/a.md && git commit -qm "batch step $i"); done
+G1=$(gen); begin
+lib mut "$STAGE/pack.json" 'd["seen"]["commits"]=1'   # the pack this judgement reads showed 1 of the 3 listed commits
+pub "" update; t_pre "FX-window: a judgement that read 1 of 3 listed commits publishes" "$eo" "PM_EMBED_OK"
+t_eq "FX-window: ... the window start stays where it was (the heads and the generation before the batch)" "$(S '(d["read"]["heads"] != d["judged_key"]["heads"], d["read"]["generation"])')" "(True, '$G1')"
+t_has "FX-window: ... and the assurance says what it did not read" "$(S 'd["assurance"]["why"]')" "map read 1 of 3 commits"
+(cd "$R" && echo 4 >> docs/a.md && git add docs/a.md && git commit -qm "batch step 4"); begin
+t_eq "FX-window: the next judgement's window holds the 3 unread commits and the new one, measured from the earlier point" "$(get "$STAGE/pack.json" '(d["commits"]["count"], sorted(i["s"] for x in d["commits"]["days"] for i in x["items"]), d["since"]["generation"], d["seen"]["commits"], d["seen"]["commits_total"])')" "(4, ['batch step 1', 'batch step 2', 'batch step 3', 'batch step 4'], '$G1', 4, 4)"
+pub "" update; t_pre "FX-window: ... it reads all of them" "$eo" "PM_EMBED_OK"
+t_eq "FX-window: ... so the window moves on to the heads it read" "$(S '(d["read"]["heads"] == d["judged_key"]["heads"], d["read"]["generation"] == d["generation"], [w for w in d["assurance"]["why"] if "map read" in w])')" "(True, True, [])"
+(cd "$R" && echo 5 >> docs/a.md && git add docs/a.md && git commit -qm "batch step 5"); begin
+t_eq "FX-window: ... and the next window is the ordinary one" "$(get "$STAGE/pack.json" '(d["commits"]["count"], [i["s"] for x in d["commits"]["days"] for i in x["items"]])')" "(1, ['batch step 5'])"
+t_eq "FX-window: unit: read point: everything listed read -> the staged heads; fewer -> the window start; no previous assessment -> the staged heads" "$(python3 -c '
+import sys; sys.path.insert(0, sys.argv[1]); import pm_validate as V
+snap = {"commits": {"count": 60, "listed": 40}, "key": {"heads": {".": "bbbbbbbbbbbb"}}, "facts_at": "T", "window_heads": {".": "aaaaaaaaaaaa"},
+        "since": {"generation": "000001-00000000", "assessed_at": "T0"}}
+a = V.read_point(snap, {"commits": 40}, "000002-11111111")["heads"]; b = V.read_point(snap, {"commits": 39}, "g")["heads"]
+c = V.read_point(snap, None, "g")["heads"]; snap["since"] = None; d = V.read_point(snap, {"commits": 0}, "g")["heads"]
+print(a, b, c, d)' "$HOOKS")" "{'.': 'bbbbbbbbbbbb'} {'.': 'aaaaaaaaaaaa'} {'.': 'aaaaaaaaaaaa'} {'.': 'bbbbbbbbbbbb'}"
+# J1: a repository discovered after the read point, and a folder that becomes a Git repository, keep their unread commits too
+mkrepo fxn; begin; pub "" full
+printf 'repo2/\n' >> "$R/.gitignore"; mkdir -p "$R/repo2"; (cd "$R/repo2" && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && for i in 1 2 3; do echo $i > n$i.txt; git add -A; git commit -qm "nested $i"; done); (cd "$R" && git add -A && git commit -qm "ignore repo2")
+begin
+t_eq "FX-window new repo: setup: the new repository's 3 commits and the root's 1 are in the window" "$(get "$STAGE/pack.json" 'sorted(i["s"] for x in d["commits"]["days"] for i in x["items"])')" "['ignore repo2', 'nested 1', 'nested 2', 'nested 3']"
+lib mut "$STAGE/pack.json" 'd["seen"]["commits"]=1'; pub "" update; t_pre "FX-window new repo: a judgement that read 1 of 4 publishes" "$eo" "PM_EMBED_OK"
+t_eq "FX-window new repo: ... the held window names the new repository as starting at its history" "$(S 'repr(d["read"]["heads"].get("repo2"))')" "''"
+(cd "$R" && echo r >> docs/a.md && git add docs/a.md && git commit -qm "root after"); begin
+t_eq "FX-window new repo: the next window still holds the new repository's unread commits" "$(get "$STAGE/pack.json" 'sorted(i["s"] for x in d["commits"]["days"] for i in x["items"])')" "['ignore repo2', 'nested 1', 'nested 2', 'nested 3', 'root after']"
+pub "" update; (cd "$R" && echo r >> docs/a.md && git add docs/a.md && git commit -qm "root later"); begin
+t_eq "FX-window new repo: once read, they leave the window" "$(get "$STAGE/pack.json" 'sorted(i["s"] for x in d["commits"]["days"] for i in x["items"])')" "['root later']"
+mkdir -p "$T/fxg"; R=$(cd "$T/fxg" && pwd -P); PM="$R/.project-map"; seq 1 300 > "$R/PLAN.md"; seq 1 200 > "$R/REVIEW-LOG.md"; echo r > "$R/README.md"; mkdir -p "$R/docs"; echo d > "$R/docs/a.md"
+begin; pub "" full; t_pre "FX-window plain folder: setup: a map of a folder without Git" "$eo" "PM_EMBED_OK"
+(cd "$R" && printf '.project-map/\n' > .gitignore && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && git add -A && git commit -qm "first git commit" && echo 2 >> docs/a.md && git commit -qam "second git commit")
+begin; lib mut "$STAGE/pack.json" 'd["seen"]["commits"]=0'; pub "" update; t_pre "FX-window plain folder: it becomes a Git repository; a judgement reads 0 of its 2 commits" "$eo" "PM_EMBED_OK"
+(cd "$R" && echo 3 >> docs/a.md && git commit -qam "third git commit"); begin
+t_eq "FX-window plain folder: the next window still holds the 2 unread commits" "$(get "$STAGE/pack.json" 'sorted(i["s"] for x in d["commits"]["days"] for i in x["items"])')" "['first git commit', 'second git commit', 'third git commit']"
+# a state from before 3.6.1 (no `read`) whose judgement read fewer commits than its snapshot listed: the re-judgement re-opens that batch
+mkrepo fxl; begin; pub "" full
+for i in 1 2 3; do (cd "$R" && echo "$i" >> docs/a.md && git add docs/a.md && git commit -qm "old batch $i"); done
+G1=$(gen); begin; pub "" update; t_pre "FX-window legacy: setup: a judged batch of 3 commits" "$eo" "PM_EMBED_OK"
+lib mut "$PM/current/state.json" 'd.pop("read", None); d.pop("judged_pack", None); d["judged_seen"]=dict(d["judged_seen"], commits=0)'; lib resign "$PM/current"
+out=$(facts); t_pre "FX-window legacy: that judgement read 0 of 3 -> the one re-judgement" "$out" "NEEDS_JUDGEMENT previous assessment read only part of the changes inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FX-window legacy: ... its window is the unread batch again, measured from the generation it started from" "$(get "$STAGE/pack.json" '(d["commits"]["count"], sorted(i["s"] for x in d["commits"]["days"] for i in x["items"]), d["since"]["generation"])')" "(3, ['old batch 1', 'old batch 2', 'old batch 3'], '$G1')"
+pub "" update; t_pre "FX-window legacy: ... published" "$eo" "PM_EMBED_OK"
+t_eq "FX-window legacy: ... read everything: the window moves on, revision recorded" "$(S '(d["read"]["heads"] == d["judged_key"]["heads"], d["judged_pack"])')" "(True, 2)"
+mkrepo fxl2; begin; pub "" full
+for i in 1 2; do (cd "$R" && echo "$i" >> docs/a.md && git add docs/a.md && git commit -qm "gone batch $i"); done
+G1=$(gen); begin; pub "" update
+lib mut "$PM/current/state.json" 'd.pop("read", None); d.pop("judged_pack", None); d["judged_seen"]=dict(d["judged_seen"], commits=0)'; lib resign "$PM/current"
+lib mut "$PM/gen-$G1/state.json" 'd["judged_at"]="2000-01-01T00:00:00+00:00"'   # still valid JSON: only the signature catches it
+t_eq "FX-window legacy: the window never restarts from a start generation that does not verify (checked before any run cleans it up)" "$(python3 -c '
+import sys, json; sys.path.insert(0, sys.argv[1]); import pm_collect as K
+print(K.window_base(sys.argv[2], K.load_prev(sys.argv[2] + "/.project-map")))' "$HOOKS" "$R")" "(None, None)"
+out=$(facts --no-stage); t_pre "FX-window legacy: ... and it is still the one re-judgement" "$out" "NEEDS_JUDGEMENT previous assessment read only part of the changes"
+rm -rf "$PM/gen-$G1"
+out=$(facts); t_pre "FX-window legacy: the generation it started from is gone: still the one re-judgement" "$out" "NEEDS_JUDGEMENT previous assessment read only part of the changes inv "
+t_eq "FX-window legacy: ... with the ordinary window (nothing to restart from)" "$(get "$PM/inv-${out##* }/pack.json" '(d["commits"]["count"], d["since"]["generation"] != "'"$G1"'")')" "(0, True)"
+# K1 (r3): legacy states with a null head (a plain root): the null is the history start, it never disables recovery for the map
+mkdir -p "$T/fxk"; R=$(cd "$T/fxk" && pwd -P); PM="$R/.project-map"; seq 1 300 > "$R/PLAN.md"; seq 1 200 > "$R/REVIEW-LOG.md"; echo r > "$R/README.md"; mkdir -p "$R/docs" "$R/nested"; echo d > "$R/docs/a.md"
+(cd "$R/nested" && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && echo 0 > n.txt && git add -A && git commit -qm "nested start")
+begin; pub "" full; t_eq "FX-window legacy plain root: setup: the root has a null head next to the nested repository's" "$(S 'sorted((r, h is None) for r, h in d["judged_key"]["heads"].items())')" "[('.', True), ('nested', False)]"
+for i in 1 2 3; do (cd "$R/nested" && echo "$i" >> n.txt && git commit -qam "nested work $i"); done
+G1=$(gen); begin; pub "" update
+lib mut "$PM/current/state.json" 'd.pop("read", None); d.pop("judged_pack", None); d["judged_seen"]=dict(d["judged_seen"], commits=0)'; lib resign "$PM/current"
+out=$(facts); t_pre "FX-window legacy plain root: the old cut judgement -> the one re-judgement" "$out" "NEEDS_JUDGEMENT previous assessment read only part of the changes inv "
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FX-window legacy plain root: ... the nested repository's 3 unread commits are back in the window" "$(get "$STAGE/pack.json" '(sorted(i["s"] for x in d["commits"]["days"] for i in x["items"]), d["since"]["generation"])')" "(['nested work 1', 'nested work 2', 'nested work 3'], '$G1')"
+pub "" update; t_eq "FX-window legacy plain root: ... read, the window moves on" "$(S 'd["read"]["heads"]["nested"] == d["judged_key"]["heads"]["nested"] and d["read"]["generation"] == d["generation"]')" "True"
+mkdir -p "$T/fxk2"; R=$(cd "$T/fxk2" && pwd -P); PM="$R/.project-map"; seq 1 300 > "$R/PLAN.md"; seq 1 200 > "$R/REVIEW-LOG.md"; echo r > "$R/README.md"; mkdir -p "$R/docs"; echo d > "$R/docs/a.md"
+begin; pub "" full
+(cd "$R" && printf '.project-map/\n' > .gitignore && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && git add -A && git commit -qm "first git commit" && echo 2 >> docs/a.md && git commit -qam "second git commit")
+G1=$(gen); begin; pub "" update
+lib mut "$PM/current/state.json" 'd.pop("read", None); d.pop("judged_pack", None); d["judged_seen"]=dict(d["judged_seen"], commits=0)'; lib resign "$PM/current"
+out=$(facts); INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FX-window legacy plain-to-Git: the old cut judgement re-opens the 2 commits from the root's history" "$(get "$STAGE/pack.json" 'sorted(i["s"] for x in d["commits"]["days"] for i in x["items"])')" "['first git commit', 'second git commit']"
+t_eq "FX-window unit: null and \"\" are one start; a read record equal to the judged heads up to that spelling is the ordinary window" "$(python3 -c '
+import sys; sys.path.insert(0, sys.argv[1]); import pm_collect as K
+print(K._heads_ok({".": None, "n": "aaaaaaa"}, {".": None, "n": "bbbbbbb"}), K._heads_ok({".": "", "n": "aaaaaaa"}, {".": None, "n": "aaaaaaa"}), K._heads_ok({".": 5}, {}))' "$HOOKS")" "True False False"
+# L1 (r4): an invocation staged by 3.6.0 (no window_heads, a pack without rev) published by the current embed keeps the unread batch
+fxold() { # NAME KEEP_PREV_KEY(1|0): a map, 3 commits staged the 3.6.0 way, a judgement that read none of them, published now
+  mkrepo "$1"; begin; pub "" full
+  for i in 1 2 3; do (cd "$R" && echo "$i" >> docs/a.md && git add docs/a.md && git commit -qm "staged old $i"); done
+  G1=$(gen); begin
+  lib mut "$STAGE/snapshot.json" 'd.pop("window_heads", None)'"$( [ "$2" = 0 ] && printf '; d["prev_key"]=None' )"
+  lib mut "$STAGE/pack.json" 'd.pop("rev", None); d["seen"]["commits"]=0'
+  pub "" update
+}
+fxold fxo1 1; t_pre "FX-window old staging: a 3.6.0 staging that read 0 of 3 publishes" "$eo" "PM_EMBED_OK"
+t_eq "FX-window old staging: ... the read record starts where that window started (its staged judged heads), not empty" "$(S '(d["read"]["heads"] != {} and d["read"]["heads"] != d["judged_key"]["heads"], d["read"]["generation"], d["judged_pack"])')" "(True, '$G1', 1)"
+out=$(facts); INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FX-window old staging: ... the one re-judgement re-opens the 3 unread commits" "$(printf '%s' "${out%% inv *}")|$(get "$STAGE/pack.json" 'sorted(i["s"] for x in d["commits"]["days"] for i in x["items"])')" "NEEDS_JUDGEMENT previous assessment read only part of the changes|['staged old 1', 'staged old 2', 'staged old 3']"
+pub "" update; t_eq "FX-window old staging: ... read, the window moves on" "$(S '(d["read"]["heads"] == d["judged_key"]["heads"], d["judged_pack"])')" "(True, 2)"
+fxold fxo2 0; t_pre "FX-window old staging without prev_key: publishes" "$eo" "PM_EMBED_OK"
+t_eq "FX-window old staging without prev_key: ... no read record is written (no recoverable start)" "$(S '"read" in d')" "False"
+out=$(facts); INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+t_eq "FX-window old staging without prev_key: ... the legacy restart (since.from.generation) re-opens the 3 commits" "$(get "$STAGE/pack.json" '(sorted(i["s"] for x in d["commits"]["days"] for i in x["items"]), d["since"]["generation"])')" "(['staged old 1', 'staged old 2', 'staged old 3'], '$G1')"
+# I2: a partial hash pass must not postpone the one re-judgement forever
+mkdir -p "$T/fxc"; R=$(cd "$T/fxc" && pwd -P); PM="$R/.project-map"; seq 1 300 > "$R/PLAN.md"; seq 1 200 > "$R/REVIEW-LOG.md"; echo r > "$R/README.md"; mkdir -p "$R/docs"
+python3 - "$R/docs" <<'PY'
+import sys
+for i in range(60): open("%s/d%03d.md" % (sys.argv[1], i), "w").write("doc %d\n" % i * 20)
+PY
+begin; pub "" full
+lib mut "$PM/current/state.json" 'd.pop("judged_pack", None); d["judged_seen"]=dict(d["judged_seen"], ledger_cut=True)'; lib resign "$PM/current"
+rm -f "$PM/cache.json"; out=$(PM_FACTS_SLOW=0.02 facts --budget 1)
+t_pre "FX-rejudge-partial: an old cut judgement and a partial hash pass -> the re-judgement, not another refresh" "$out" "NEEDS_JUDGEMENT previous assessment read only part of the changes"
+
+# ---- FX-page: a ready:false decision is a LATER decision, never "waits for your answer"; the plan table numbers phases like the list
+if [ "$HAVE_NODE" = 1 ]; then
+  FXD1='{"id":"D-001","q":"Open the PR?","options":[{"id":"A","label":"Open"},{"id":"B","label":"Hold"}],"recommended":"A","default":"hold","hard_rule":"upstream_post","deadline":null,"ready":false,"status":"open"}'
+  FXD2='{"id":"D-002","q":"Pick a name?","options":[{"id":"A","label":"Alpha"},{"id":"B","label":"Beta"}],"recommended":"A","default":"A","hard_rule":null,"deadline":null,"ready":true,"status":"open"}'
+  rbpage '{"decisions":['"$FXD1"','"$FXD2"']}'
+  t_eq "FX-page: the ready decision is a card under the current phase; the ready:false one only under Later decisions, not asked yet" "$(pj 'sorted(d["cards"])')" "[['D-001', True, 'Not asked yet · will need your explicit answer'], ['D-002', False, 'Default A']]"
+  t_eq "FX-page: ... the disclosure says how many, right after the Handoff (which stays first, 3.5)" "$(pj 'd["disclosures"][:2]')" "['Handoff', 'Later decisions (1, not asked yet)']"
+  t_eq "FX-page: ... and only the ready one needs the owner" "$(pj '(d["pill"], d["count"])')" "('Needs you', '1')"
+  rbpage '{"decisions":['"$FXD1"']}'
+  t_eq "FX-page: only a ready:false decision: no card under the phase, nothing waits for the owner" "$(pj '(sorted(d["cards"]), d["count"] in ("Nothing", "None found"), "Waits for your answer" in json.dumps(d))')" "([['D-001', True, 'Not asked yet · will need your explicit answer']], True, False)"
+  t_eq "FX-page: the plan table names a phase by its position in the phase list (01, 02, ...), never by its id" "$(pj 'sorted(set(x[1] for x in d["planPhase"]))')" "$(S 'sorted("%02d" % (i + 1) for i, p in enumerate(d["phases"]) if p.get("criteria"))')"
+fi
 
 fi   # PM_FC_ONLY=1
 

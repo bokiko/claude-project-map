@@ -348,6 +348,17 @@ def _release_view(repos):
 FOCUS_CONFIRMED = "focus confirmed"
 
 
+REJUDGE_CUT = "previous assessment read only part of the changes"
+
+
+def rejudge_cut(S):
+    """16.2: the last judgement read a cut pack (`judged_seen` names omitted work) built by an older pack revision."""
+    seen = S.get("judged_seen")
+    rev = S.get("judged_pack")
+    return isinstance(seen, dict) and bool(VAL.omitted_work(seen)) and not (isinstance(rev, int) and not isinstance(rev, bool)
+                                                                             and rev >= K.PACK_REV)
+
+
 def decide(root, pm, prev, snap, lines=None, fast=True):
     """-> (verdict, why). verdict in NEEDS_FULL | NEEDS_JUDGEMENT | NEEDS_REFRESH | NO_CHANGE. `lines`: the complete lines of the
     answers.jsonl image this snapshot was collected from; with fast=True and only answers_count moved, lines that confirm exactly
@@ -371,6 +382,8 @@ def decide(root, pm, prev, snap, lines=None, fast=True):
     if partial:
         if cmp["git"]:
             return "NEEDS_JUDGEMENT", cmp["why"]
+        if not cmp["moved"] and rejudge_cut(S) and not prev.get("unverified") and not consistency(pm, prev["gen"]):
+            return "NEEDS_JUDGEMENT", REJUDGE_CUT   # 16.2: a partial hash pass must not keep postponing the one re-judgement
         return "NEEDS_REFRESH", "coverage partial %d/%d" % (st["covered"], st["total"])
     if cmp["moved"]:
         if fast and lines is not None and cmp["moved"] == ["answers_count"] and not prev.get("unverified") \
@@ -382,6 +395,10 @@ def decide(root, pm, prev, snap, lines=None, fast=True):
     bad = consistency(pm, prev["gen"])
     if bad:
         return "NEEDS_REFRESH", "generation mismatch"
+    # 3.6.1: a judgement that read a CUT pack built by an older pack revision is redone once: the current builder keeps more of the
+    # same facts (commit subjects last), and the judgement it then reads is recorded with the current revision, so this never repeats
+    if rejudge_cut(S):
+        return "NEEDS_JUDGEMENT", REJUDGE_CUT
     if cmp["adopt"] or S["coverage"].get("coverage") == "partial":
         return "NEEDS_REFRESH", "coverage complete"
     if S["template_hash"] != snap["template_hash"] or S["embed_hash"] != snap["embed_hash"]:

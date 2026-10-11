@@ -16,8 +16,10 @@ CLI (used by pm-git.sh only): pm_git.py --agent ROOT <sub> [args]
 from __future__ import annotations
 
 import os
+import stat as stat_mod
 import re
 import subprocess
+import time as _time
 import sys
 
 __all__ = ["tag_name_problem", "tag_name_git_ok", "GitArgError", "run", "stream_lines", "collection_failure", "toplevel", "env_for_git", "argv_prefix"]
@@ -90,6 +92,8 @@ def _v_log(a):
     if i < len(a) and a[i].startswith("--since="):
         if not re.fullmatch(r"--since=[0-9][0-9A-Za-z:+.\- ]{0,39}", a[i]):
             _bad("log: bad --since")
+        i += 1
+    if i < len(a) and a[0] == LOG_INTERNAL and re.fullmatch(r"[0-9a-f]{7,40}\.\.HEAD", a[i]):   # 3.6.2: internal P..HEAD only
         i += 1
     _tail_paths(a, i)
 
@@ -290,6 +294,200 @@ def run(repo, sub, *args, timeout=20.0):
     except OSError:
         return 127, ""
     return p.returncode, p.stdout.decode("utf-8", errors="replace")
+
+
+def _fixed(repo, args, timeout):
+    """A constant internal git command (never agent input) with the same hardened prefix and environment. -> (rc, out)."""
+    try:
+        p = subprocess.run(argv_prefix(repo) + list(args), env=env_for_git(), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return 124, ""
+    return p.returncode, p.stdout.decode("utf-8", errors="replace")
+
+
+def _exclude_pattern(rel, name):
+    """The anchored, escaped exclude line for <rel>/<name>/ (rel "" = the worktree top)."""
+    p = (rel + "/" if rel else "") + name
+    esc = "".join("\\" + ch if ch in "*?[\\" else ch for ch in p)
+    return "/" + esc + "/"
+
+
+def ensure_local_exclude(root, name=".project-map", timeout=5.0, deadline=None):
+    """3.6.2 (INTERFACES 17.5): keep ROOT/<name>/ out of commits WITHOUT touching a tracked file. When ROOT is inside a Git work
+    tree whose `check-ignore` does not already ignore the folder, ONE anchored, escaped line ("/<rel>/<name>/") is appended to the
+    repository's local exclude file <common dir>/info/exclude (shared by linked worktrees). Boundaries: the common dir is resolved by
+    the hardened git and opened as a directory; `info` is opened (or created) RELATIVE to that descriptor with O_NOFOLLOW, and
+    `exclude` relative to the `info` descriptor with O_APPEND|O_CREAT|O_NOFOLLOW, then fstat-checked (regular, one link); a link
+    anywhere on that path is refused; append-only (no read-replace, so a concurrent writer loses nothing; a duplicate line is
+    harmless). Never untracks or edits .gitignore. Never
+    raises. -> (status, why): ("added"|"ignored"|"skip"|"not_ignored", why) -- "not_ignored" when the folder is still not ignored
+    (a negation rule, a refused or failed step, tracked map files, a query that did not answer); "skip" only for what git confirms is
+    not a work tree (a plain folder: rc 128; a bare repository or the inside of .git: "false"); "deferred" when the caller's
+    `deadline` (absolute time.monotonic()) leaves no time: the next publication tries again."""
+    import time as _t
+
+    def q(args):   # one bounded query; None when the deadline has passed
+        left = timeout if deadline is None else min(timeout, deadline - _t.monotonic())
+        if left <= 0.05:
+            return None
+        return _fixed(root, args, left)
+    try:
+        r = q(["rev-parse", "--is-inside-work-tree"])
+        if r is None:
+            return "deferred", "out of time; the next publication checks again"
+        rc, out = r
+        if rc == 0 and out.strip() == "false":   # git answered: a bare repository or the inside of .git
+            return "skip", ""
+        if rc != 0:   # J3: a fatal answer is a plain folder only when no .git entry exists here or above (git's own discovery)
+            return ("skip", "") if not _git_entry_above(root) else ("not_ignored", "git could not read this repository's metadata")
+        if out.strip() != "true":
+            return "not_ignored", "git did not answer whether this is a work tree"
+        r = q(["ls-files", "-z", "--", name])
+        if r is None:
+            return "deferred", "out of time; the next publication checks again"
+        if r[0] != 0:
+            return "not_ignored", "git could not tell whether the map files are tracked"
+        if r[1].strip("\0"):
+            return "not_ignored", "map files are tracked by git (untrack them yourself: git rm -r --cached %s)" % name
+        r = q(["check-ignore", "-q", name])
+        if r is None:
+            return "deferred", "out of time; the next publication checks again"
+        if r[0] == 0:
+            return "ignored", ""
+        if r[0] != 1:   # 1 = not ignored; anything else did not answer
+            return "not_ignored", "git could not check the ignore rules"
+        r1, r2 = q(["rev-parse", "--show-toplevel"]), q(["rev-parse", "--git-common-dir"])
+        if r1 is None or r2 is None:
+            return "deferred", "out of time; the next publication checks again"
+        (rc, top), (rc2, common) = r1, r2
+        top, common = top.strip(), common.strip()
+        if rc != 0 or rc2 != 0 or not top or not common or "\n" in top or "\n" in common:
+            return "not_ignored", "the repository's metadata folder could not be resolved"
+        if os.path.realpath(top) == os.path.realpath(os.path.expanduser("~")):   # a repository of the home folder: never touched
+            return "skip", ""
+        common = os.path.realpath(common if os.path.isabs(common) else os.path.join(root, common))
+        rel = os.path.relpath(os.path.realpath(root), os.path.realpath(top))
+        if rel == ".":
+            rel = ""
+        if rel.startswith(".."):
+            return "not_ignored", "the map folder is outside the work tree"
+        # Every step below works relative to an OPEN directory descriptor with O_NOFOLLOW, so swapping a component for a link
+        # between the checks and the write cannot redirect it (the common directory itself was resolved by realpath first).
+        D = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        cfd = os.open(common, D)
+        try:
+            try:
+                ifd = os.open("info", D, dir_fd=cfd)
+            except FileNotFoundError:
+                os.mkdir("info", 0o755, dir_fd=cfd)
+                ifd = os.open("info", D, dir_fd=cfd)
+            try:
+                fd = os.open("exclude", os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o644, dir_fd=ifd)
+                try:
+                    st = os.fstat(fd)
+                    if not stat_mod.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                        return "not_ignored", "info/exclude is not a plain file"
+                    lead = b""
+                    if st.st_size:
+                        rfd = os.open("exclude", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=ifd)
+                        try:
+                            if (os.fstat(rfd).st_ino, os.fstat(rfd).st_dev) != (st.st_ino, st.st_dev):
+                                return "not_ignored", "info/exclude changed while it was opened"
+                            os.lseek(rfd, -1, os.SEEK_END)
+                            lead = b"" if os.read(rfd, 1) == b"\n" else b"\n"
+                        finally:
+                            os.close(rfd)
+                    os.write(fd, lead + _exclude_pattern(rel, name).encode("utf-8") + b"\n")
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(ifd)
+        finally:
+            os.close(cfd)
+        r = q(["check-ignore", "-q", name])
+        if r is None or r[0] not in (0, 1):
+            return "not_ignored", "the exclude line was added but git could not confirm it applies"
+        if r[0] != 0:
+            return "not_ignored", "a rule in .gitignore re-includes it"
+        return "added", ""
+    except Exception as ex:   # noqa: BLE001 - a convenience: never fails a publication
+        return "not_ignored", "the local exclude file could not be written (%s)" % type(ex).__name__
+
+
+def object_info(repo, sha, timeout=5.0):
+    """3.6.2 (INTERFACES 17.3): what <sha> names, from ONE completed `git cat-file --batch-check` (the id on stdin, never argv).
+    -> ("commit", full_oid) | ("other", full_oid) | ("missing", None) | ("ambiguous", None) | ("unknown", None). Only git's own
+    documented "missing" answer from a query that completed is absence; a fatal error, a timeout, malformed output, an
+    unreadable or corrupt object store are "unknown". Raises GitArgError for a malformed id."""
+    if not _is_str(sha) or not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        _bad("bad object id: %r" % (sha,))
+    try:
+        p = subprocess.run(argv_prefix(repo) + ["cat-file", "--batch-check"], input=(sha + "\n").encode(), env=env_for_git(),
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown", None
+    if p.returncode != 0:
+        return "unknown", None
+    line = p.stdout.decode("utf-8", "replace").strip()
+    parts = line.split()
+    if parts == [sha, "missing"]:
+        return "missing", None
+    if parts == [sha, "ambiguous"]:
+        return "ambiguous", None
+    if len(parts) == 3 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[0]) and parts[0].startswith(sha) and parts[2].isdigit():
+        return ("commit" if parts[1] == "commit" else "other"), parts[0]
+    return "unknown", None
+
+
+def _git_entry_above(path):
+    """True when a `.git` entry (directory or file) exists in PATH or any parent: git's own discovery would find a repository."""
+    p = os.path.realpath(path)
+    while True:
+        if os.path.lexists(os.path.join(p, ".git")):
+            return True
+        q = os.path.dirname(p)
+        if q == p:
+            return False
+        p = q
+
+
+def _left(timeout, deadline):
+    """J4: the allowance for the NEXT git call: the per-call timeout, cut to what is left before the absolute deadline."""
+    if deadline is None:
+        return timeout
+    return min(timeout, deadline - _time.monotonic())
+
+
+def is_shallow(repo, timeout=5.0):
+    """True | False | None (no answer): a shallow clone's history stops at a boundary, so a negative ancestry answer is not proof."""
+    rc, out = _fixed(repo, ["rev-parse", "--is-shallow-repository"], timeout)
+    return {"true": True, "false": False}.get(out.strip()) if rc == 0 else None
+
+
+def commit_reach(repo, sha, timeout=5.0, deadline=None):
+    """3.6.2 (INTERFACES 17.3): is commit <sha> part of the CHECKED-OUT history of this repository? -> ("ok", oid) (an ancestor
+    of HEAD) | ("unreachable", oid) (the object exists but HEAD does not reach it: a reset, rebase or force-push dropped it, or it
+    lives only on another branch, tag or a backup ref: none of these is evidence for the current checkout) | ("absent", None) (git
+    answered "missing", or the id names no commit) | ("unknown", None) (any failed, ambiguous or timed-out query)."""
+    t = _left(timeout, deadline)   # J4: every call gets only what is left before `deadline`; none is started after it
+    if t <= 0.05:
+        return "unknown", None
+    kind, oid = object_info(repo, sha, t)
+    if kind in ("missing", "other"):
+        return "absent", None
+    if kind != "commit":
+        return "unknown", None
+    t = _left(timeout, deadline)
+    if t <= 0.05:
+        return "unknown", None
+    rc, _ = run(repo, "merge-base", "--is-ancestor", oid, "HEAD", timeout=t)
+    if rc == 0:
+        return "ok", oid
+    t = _left(timeout, deadline)
+    if rc == 1 and t > 0.05 and is_shallow(repo, t) is False:   # a shallow clone's negative answer proves nothing (I1)
+        return "unreachable", oid
+    return "unknown", None
 
 
 def collection_failure(sub, rc):

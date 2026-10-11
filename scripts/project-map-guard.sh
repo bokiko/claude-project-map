@@ -453,37 +453,13 @@ Write|Edit)
       .*|*[!A-Za-z0-9_.-]*) deny "$TOOL: odd memory file name";;
       *.md) KIND=out;;
     esac
-  elif [ "$RPAR" = "$RROOT" ] && [ "$BN" = .gitignore ]; then
-    KIND=gi
   fi
-  [ -n "$KIND" ] || deny "$TOOL: target not allowed (judgement.out.json, plan.out.json (FULL), agent memory *.md, root .gitignore append): $FP"
+  [ -n "$KIND" ] || deny "$TOOL: target not allowed (judgement.out.json, plan.out.json (FULL), agent memory *.md): $FP"
   if [ -L "$FP" ]; then deny "$TOOL: target is a symlink"; fi
   if [ -e "$FP" ]; then
     [ -f "$FP" ] || deny "$TOOL: target is not a regular file"
     [ "$(nlink "$FP")" = 1 ] || deny "$TOOL: target has more than one hard link"
   fi
-  [ "$KIND" = gi ] || exit 0
-  # .gitignore: previous content plus exactly one line ".project-map/"
-  WANT=".project-map/"
-  OLD=""; if [ -e "$FP" ]; then OLD=$(cat "$FP"; printf x); OLD=${OLD%x}; fi
-  gi_ok() { # $1 = candidate new content
-    [ "$1" = "$OLD$WANT"$'\n' ] && { [ -z "$OLD" ] || case "$OLD" in *$'\n') true;; *) false;; esac; } && return 0
-    [ -n "$OLD" ] && case "$OLD" in *$'\n') false;; *) true;; esac && [ "$1" = "$OLD"$'\n'"$WANT"$'\n' ] && return 0
-    return 1
-  }
-  if [ "$TOOL" = Write ]; then
-    gi_ok "$CONTENT" || deny ".gitignore: Write may only append the single line $WANT to the existing content"
-    exit 0
-  fi
-  [ -e "$FP" ] || deny ".gitignore: Edit on a missing file"
-  [ "$RALL" = false ] || deny ".gitignore: replace_all not allowed"
-  if [ -z "$OLDS" ]; then
-    [ -z "$OLD" ] || deny ".gitignore: empty old_string on a non-empty file"
-    NEWF="$NEWS"
-  else
-    case "$OLD" in *"$OLDS"*) NEWF="${OLD%%"$OLDS"*}$NEWS${OLD#*"$OLDS"}";; *) deny ".gitignore: old_string not found";; esac
-  fi
-  gi_ok "$NEWF" || deny ".gitignore: Edit may only append the single line $WANT"
   exit 0 ;;
 
 # ---------------------------------------------------------- Bash
@@ -491,10 +467,13 @@ Bash)
   C="$CMD"
   [ -n "$C" ] || deny "empty command"
   if [ "$BMODE" = FULL ]; then
-    CH='"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu --hide-scrollbars'
     URL="file://$BROOT/.project-map/index.html"
-    [ "$C" = "$CH --window-size=1440,900 --screenshot=$STAGE/shot-desktop.png $URL" ] && exit 0
-    [ "$C" = "$CH --window-size=390,844 --screenshot=$STAGE/shot-mobile.png $URL" ] && exit 0
+    # the two exact screenshot commands, with the macOS Chrome app or (3.6.2) a Linux Chrome/Chromium at a fixed path
+    for CB in '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"' /usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser; do
+      CH="$CB --headless=new --disable-gpu --hide-scrollbars"
+      [ "$C" = "$CH --window-size=1440,900 --screenshot=$STAGE/shot-desktop.png $URL" ] && exit 0
+      [ "$C" = "$CH --window-size=390,844 --screenshot=$STAGE/shot-mobile.png $URL" ] && exit 0
+    done
   fi
   case "$C" in *[]\;\&\`\$\(\)\{\}\<\>\!\*\?\[\~\\=#]*) deny "shell metacharacter not allowed";; esac
   case "$C" in *[[:cntrl:]]*) deny "control character or newline not allowed";; esac

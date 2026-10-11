@@ -8,6 +8,7 @@ import copy
 import json
 import os
 import re
+import time
 import stat as _stat
 
 import pm_common as C
@@ -27,7 +28,7 @@ TOP_KEYS = {"generation", "project", "run", "watch", "repos", "headline", "parts
 SCRIPT_OWNED = ("answer", "answered_by", "answered_at", "status", "raised_at", "frozen",
                 "closed_by", "closed_at", "overtaken_why", "overtaken_ref", "intent_hash", "observations")
 REPAIRS_MAX = 12   # 15.1: the repair queue the pack lists, and the validation obligation, per judgement
-EVID_WHY = ("file missing", "line past end", "commit missing", "repo moved")   # the only reasons a completion ref can be lost for
+EVID_WHY = ("file missing", "line past end", "commit missing", "repo moved", "commit not in history")   # the only reasons a completion ref can be lost for
 DRIFT_OPTIONS = [{"id": "A", "label": "Keep the focus"}, {"id": "B", "label": "Revise the focus (then say the new one)"},
                  {"id": "C", "label": "Unclear, keep watching"}]   # 15.3: the only options a drift decision may have
 OPEN_ST = ("open", "overdue")
@@ -162,6 +163,59 @@ def _confined(root, rest, label):
     return None, rp
 
 
+def ref_check(root, repos, ref, bind=None, deadline=None):
+    """3.6.2 (17.3) -> (status, msg, resolution): status ok | problem | unknown. A commit ref with a valid `bind` (the repository it was
+    accepted in, its full id) is checked ONLY there: ok, problem (not in that repository's checked-out history any more), or unknown
+    (the query failed: never a problem, never a fresh verification). Without a binding it is ref_problem (the first repository whose
+    checked-out history contains it, root first; nothing confirmed = problem); `resolution` = {repo, oid} of an ok commit ref."""
+    if isinstance(ref, str) and ref.startswith("commit:") and re.fullmatch(r"[0-9a-f]{7,40}", ref[7:]):
+        sha = ref[7:]
+        t = 10.0 if deadline is None else max(0.2, min(10.0, deadline - time.monotonic()))
+        if isinstance(bind, dict) and isinstance(bind.get("repo"), str) and isinstance(bind.get("oid"), str) \
+                and re.fullmatch(r"[0-9a-f]{40}", bind["oid"]) and bind["oid"].startswith(sha):
+            prob, rp = _confined(root, bind["repo"] if bind["repo"] != "." else "", "repo path") if bind["repo"] != "." else (None, root)
+            if prob:
+                return "problem", "commit %s: the repository it was accepted in (%s) is gone" % (sha, bind["repo"][:40]), None
+            try:
+                st, oid = G.commit_reach(rp, bind["oid"], timeout=t)
+            except G.GitArgError:
+                st, oid = "unknown", None
+            if st == "ok":
+                return "ok", None, {"repo": bind["repo"], "oid": oid}
+            if st == "unknown":
+                return "unknown", "commit %s could not be checked in %s" % (sha, bind["repo"][:40]), None
+            return "problem", "commit %s is not in the checked-out history of %s, where it was accepted" % (sha, bind["repo"][:40]), None
+        for r in repos:
+            if not (isinstance(r, dict) and r.get("vcs") == "git" and isinstance(r.get("path"), str)):
+                continue
+            try:
+                st, oid = G.commit_reach(root if r["path"] == "." else os.path.join(root, r["path"]), sha, timeout=t)
+            except G.GitArgError:
+                continue
+            if st == "ok":
+                return "ok", None, {"repo": r["path"], "oid": oid}
+    msg = ref_problem(root, repos, ref)
+    return ("problem", msg, None) if msg else ("ok", None, None)
+
+
+def completion_problem(root, repos, iid, ref, ctx):
+    """ref_problem for a COMPLETION ref (a part's, a criterion's): honours the binding the previous state holds for (iid, ref);
+    an unverifiable bound ref is no error but is recorded in ctx["ref_unknown"] (never validated now, 17.3); an ok commit ref's
+    resolution goes to ctx["ref_resolved"] for the binding of the publication."""
+    prev = ctx.get("prev") if isinstance(ctx, dict) else None
+    binds = prev.get("evidence_bind") if isinstance(prev, dict) else None
+    b = binds.get(C.evidence_key(iid, ref)) if isinstance(binds, dict) and isinstance(iid, str) and isinstance(ref, str) else None
+    st, msg, res = ref_check(root, repos, ref, b)
+    if not isinstance(ctx, dict):
+        return msg if st != "ok" and st != "unknown" else None
+    if st == "unknown":
+        ctx.setdefault("ref_unknown", set()).add((iid, ref))
+        return None
+    if st == "ok" and res:
+        ctx.setdefault("ref_resolved", {})[(iid, ref)] = res
+    return msg if st == "problem" else None
+
+
 def ref_problem(root, repos, ref):
     """None when ref is evidence that exists now: file:<rel>[:line] under ROOT, or commit:<sha7+> in a known repo."""
     if not isinstance(ref, str):
@@ -189,16 +243,21 @@ def ref_problem(root, repos, ref):
         sha = ref[7:]
         if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
             return "commit ref must be 7-40 hex characters (not HEAD or a branch)"
+        unreachable = False
         for r in repos:
             if r.get("vcs") != "git":
                 continue
             repo = root if r["path"] == "." else os.path.join(root, r["path"])
             try:
-                rc, out = G.run(repo, "cat-file", "-t", sha, timeout=10.0)
+                st, _oid = G.commit_reach(repo, sha, timeout=10.0)
             except G.GitArgError:
                 continue
-            if rc == 0 and out.strip() == "commit":
+            if st == "ok":
                 return None
+            if st == "unreachable":   # 3.6.2 (17.3): not in the checked-out history (dropped by a reset, or only on another ref)
+                unreachable = True
+        if unreachable:
+            return "commit %s is not in the checked-out history (HEAD does not contain it): cite evidence that is" % sha
         return "commit %s not found in any known repository" % sha
     return "ref must start with file: or commit:"
 
@@ -475,9 +534,13 @@ def validate_plan(v, plan, root, repos, check_refs, exempt=()):
         if not v.lst(ph["criteria"], "phase %s criteria" % ph.get("id"), 0, 8):
             continue
         for c in ph["criteria"]:
-            if not v.obj(c, "criterion", ("id", "text", "done"), ("ref",)):
+            if not v.obj(c, "criterion", ("id", "text", "done"), ("ref", "retired")):
                 continue
             cid = v.ident(c["id"], "criterion", CRIT_ID, cids)
+            rt = c.get("retired")   # 17.2: kept in its phase, never done, never counted
+            if rt is not None and not (isinstance(rt, dict) and set(rt) <= {"why", "at"} and isinstance(rt.get("why"), str)
+                                       and 0 < C.blen(rt["why"]) <= 100 and c.get("done") is False):
+                v.e("criterion %s retired must be {why<=100, at} on a criterion that is not done" % c.get("id"))
             if cid and pid and not cid.startswith(pid + "."):
                 v.e("criterion %s does not belong to phase %s" % (cid, pid))
             v.s(c["text"], "criterion %s text" % c.get("id"), 80)
@@ -492,22 +555,38 @@ def validate_plan(v, plan, root, repos, check_refs, exempt=()):
                     v.e("criterion %s: %s" % (c.get("id"), pr))
 
 
-def check_plan_refs(v, plan, root, repos, exempt=()):
+def check_plan_refs(v, plan, root, repos, exempt=(), ctx=None):
     """15.1/I2: every done criterion of `plan` must carry a ref that resolves now, except the exact (id, ref) pairs of UNLISTED known
     losses carried as they were. A FULL run calls this on the FINAL plan (the rebuilt plan with criteria_updates applied), because a
     listed loss may be reopened or given a new ref by criteria_updates while plan.out.json still shows the old one."""
     for ph in plan.get("phases") or []:
         for c in ph.get("criteria") or []:
             if isinstance(c, dict) and c.get("done") is True and isinstance(c.get("ref"), str) and c["ref"] \
-                    and (c.get("id"), c["ref"]) not in exempt and (pr := ref_problem(root, repos, c["ref"])):
+                    and (c.get("id"), c["ref"]) not in exempt and (pr := completion_problem(root, repos, c.get("id"), c["ref"], ctx)):
                 v.e("criterion %s: %s" % (c.get("id"), pr))
 
 
-def apply_updates(plan, updates):
+def check_retired_carry(v, plan, prior):
+    """17.2: in a FULL plan.out.json a `retired` record is only CARRIED: it must be the prior plan's record for the same id,
+    unchanged (retiring is done through criteria_updates, which logs it). Listing a previously retired id WITHOUT the record
+    revives it on purpose (logged as a change); omitting it removes it, like any criterion a rebuild drops."""
+    old = {c.get("id"): c.get("retired") for ph in ((prior or {}).get("phases") or []) if isinstance(ph, dict)
+           for c in ph.get("criteria") or [] if isinstance(c, dict)} if isinstance(prior, dict) else {}
+    for ph in (plan or {}).get("phases") or [] if isinstance(plan, dict) else []:
+        for c in (ph.get("criteria") or []) if isinstance(ph, dict) else []:
+            if isinstance(c, dict) and c.get("retired") is not None and c.get("retired") != old.get(c.get("id")):
+                v.e("criterion %s: a retirement can only be carried unchanged from plan.json (retire through criteria_updates)" % c.get("id"))
+
+
+def apply_updates(plan, updates, at=None):
     P = copy.deepcopy(plan)
     idx = {c["id"]: c for ph in P["phases"] for c in ph["criteria"]}
     for u in updates:
         c = idx[u["id"]]
+        if u.get("retired") is True:   # 17.2: stays in its phase, never done, out of every count
+            c["done"], c["ref"] = False, None
+            c["retired"] = {"why": u.get("why", ""), "at": at} if at else {"why": u.get("why", "")}
+            continue
         c["done"] = u["done"]
         c["ref"] = u.get("ref") or None
     return P
@@ -517,17 +596,25 @@ def derive_phases(plan, current_phase):
     """-> (phases for state.json, current id, blocking labels)."""
     phs = []
     for ph in plan["phases"]:
-        total = len(ph["criteria"])
-        dn = sum(1 for c in ph["criteria"] if c["done"])
-        phs.append({"id": ph["id"], "label": ph["label"], "done": dn, "total": total, "complete": total >= 1 and dn == total,
-                    "criteria": [dict(c) for c in ph["criteria"]]})
+        act = [c for c in ph["criteria"] if not c.get("retired")]   # 17.2: retired criteria count nowhere
+        total, ret = len(act), len(ph["criteria"]) - len(act)
+        dn = sum(1 for c in act if c["done"])
+        row = {"id": ph["id"], "label": ph["label"], "done": dn, "total": total, "complete": total >= 1 and dn == total,
+               "criteria": [dict(c) for c in ph["criteria"]]}
+        if ret:
+            row["retired"] = ret
+            row["dropped"] = total == 0   # every criterion retired: the phase no longer applies and never blocks
+        phs.append(row)
     by = {p["id"]: p for p in phs}
-    cur = current_phase if not by[current_phase]["complete"] else next((p["id"] for p in phs if not p["complete"]), current_phase)
+    settled = lambda p: p["complete"] or p.get("dropped", False)
+    cur = current_phase if not settled(by[current_phase]) else next((p["id"] for p in phs if not settled(p)), current_phase)
     ci = [p["id"] for p in phs].index(cur)
-    nxt = next((p["id"] for p in phs[ci + 1:] if not p["complete"]), None)
+    nxt = next((p["id"] for p in phs[ci + 1:] if not settled(p)), None)
     blocking = []
     for i, p in enumerate(phs):
-        if p["complete"]:
+        if p.pop("dropped", False) and p["id"] != cur:
+            p["state"] = "dropped"
+        elif p["complete"]:
             p["state"] = "done"
         elif p["id"] == cur:
             p["state"] = "current"
@@ -606,6 +693,52 @@ def evidence_state_view(S):
             unv, isinstance(rc, dict) and isinstance(rc.get("done"), int) and isinstance(rc.get("n"), int) and rc["done"] < rc["n"])
 
 
+def bind_evidence(root, repos, items, prev_binds, prev_items=(), resolved=None, deadline=None):
+    """3.6.2 (17.3): {evidence_key: {repo, oid}} for every completion COMMIT ref of the published plan and parts. A binding the
+    previous state holds for the same (id, ref) is carried unchanged. A NEW ref (not a completion ref of the previous state) is bound
+    to the first repository, in the collected order (root first, the order `ref_problem` accepted it in), whose checked-out history
+    contains it. A ref that was already there before 3.6.2 (unbound) is bound only when exactly one repository confirms it: with
+    two (a nested clone of the same history) its origin is uncertain and it stays unbound, checked in every known repository."""
+    prev_set = set(prev_items or ())
+    resolved = resolved if isinstance(resolved, dict) else {}   # what the publication's own validation resolved (no second probe)
+    out = {}
+    pb = prev_binds if isinstance(prev_binds, dict) else {}
+    for i, ref in items:
+        if not (isinstance(ref, str) and ref.startswith("commit:") and re.fullmatch(r"[0-9a-f]{7,40}", ref[7:])):
+            continue
+        k = C.evidence_key(i, ref)
+        b = pb.get(k)
+        if isinstance(b, dict) and isinstance(b.get("repo"), str) and isinstance(b.get("oid"), str) and re.fullmatch(r"[0-9a-f]{40}", b["oid"]):
+            out[k] = {"repo": b["repo"], "oid": b["oid"]}
+            continue
+        if (i, ref) not in prev_set and isinstance(resolved.get((i, ref)), dict):   # a new ref: where validation accepted it
+            out[k] = dict(resolved[(i, ref)])
+            continue
+        hits = []
+        for r in repos:
+            if deadline is not None and time.monotonic() >= deadline:   # I7: out of time: stays unbound (checked everywhere)
+                hits = []
+                break
+            if not (isinstance(r, dict) and r.get("vcs") == "git" and isinstance(r.get("path"), str)):
+                continue
+            try:   # J4: the absolute deadline goes down into every git call of the probe
+                st, oid = G.commit_reach(root if r["path"] == "." else os.path.join(root, r["path"]), ref[7:], timeout=5.0, deadline=deadline)
+            except G.GitArgError:
+                continue
+            if st == "ok" and oid and re.fullmatch(r"[0-9a-f]{40}", oid):
+                hits.append({"repo": r["path"], "oid": oid})
+        if hits and ((i, ref) not in prev_set or len(hits) == 1):
+            out[k] = hits[0]
+    return out
+
+
+def state_completion_items(S):
+    """The completion refs a published state carries: [(id, ref)] (its phases' done criteria and done parts)."""
+    if not isinstance(S, dict):
+        return []
+    return completion_items({"phases": [p for p in S.get("phases") or [] if isinstance(p, dict)]}, S.get("parts"))
+
+
 def completion_items(plan, parts):
     """The completion refs of a (final) plan and parts list: [(id, ref)] sorted."""
     out = set()
@@ -619,10 +752,11 @@ def completion_items(plan, parts):
     return sorted(out)
 
 
-def validated_now(J, snap, plan):
+def validated_now(J, snap, plan, unknown=()):
     """{(id, ref)} the publication itself just checked with ref_problem: every part ref (a known loss carried under the exception
     is not one of them), a criterion updated to done with a ref, and in a FULL run every done criterion of the rebuilt plan."""
     lost = {(e["id"], e["ref"]) for e in (snap.get("evidence") or {}).get("lost") or []}
+    lost |= set(unknown or ())   # 17.3: a bound ref the publication could not check is not verified by it
     full = (J.get("run") or {}).get("type") == "FULL"
     ups = {u["id"] for u in J.get("criteria_updates") or [] if isinstance(u, dict) and u.get("done") is True and u.get("ref")}
     out = set()
@@ -637,7 +771,7 @@ def validated_now(J, snap, plan):
     return out
 
 
-def build_evidence(snap, J, plan, recheck):
+def build_evidence(snap, J, plan, recheck, ref_unknown=()):
     """state.evidence for a JUDGED publication (15.1), over the FINAL completion refs: what the staged pass found (lost / ok /
     unknown by (id, ref)), what the publication validated just now (a repaired item with its new ref), and what the publication
     recheck found (`recheck`: {done, n, lost: [{id, ref, why}], unknown: [(id, ref)]}). -> (view, lost set). Nothing the publication
@@ -649,14 +783,15 @@ def build_evidence(snap, J, plan, recheck):
     staged_unknown = set(ev.get("unknown") or [])
     new_lost = {(e["id"], e["ref"]): e.get("why") for e in (recheck or {}).get("lost") or []}
     new_unknown = {tuple(x) for x in (recheck or {}).get("unknown") or []}
-    valid = validated_now(J, snap, plan)
+    valid = validated_now(J, snap, plan, ref_unknown)
+    pub_unknown = set(ref_unknown or ())   # J2: what the publication itself could not check outranks an older staged ok
     lost, unknown, done, ok_pairs = [], [], 0, set()
     for key in items:
         if key in new_lost:
             lost.append({"id": key[0], "ref": key[1], "why": new_lost[key] if new_lost[key] in EVID_WHY else "file missing"})
         elif key in staged_lost:
             lost.append({"id": key[0], "ref": key[1], "why": staged_lost[key] if staged_lost[key] in EVID_WHY else "file missing"})
-        elif key in new_unknown:
+        elif key in new_unknown or key in pub_unknown:
             unknown.append(key[0])
         elif key in valid or key in staged_ok:
             ok_pairs.add(key)
@@ -963,42 +1098,70 @@ def validate_judgement(J, raw_len, ctx):
                 v.s(p["line"], "part %s line" % p.get("id"), 100, 0)
             carried_loss = p.get("status") == "done" and isinstance(p.get("ref"), str) and (p.get("id"), p["ref"]) in lost_carry
             if "ref" in p and p["ref"] is not None and not carried_loss:   # 15.1: an unlisted known loss may be carried as it was
-                pr_ = ref_problem(root, repos, p["ref"])
+                pr_ = completion_problem(root, repos, p.get("id"), p["ref"], ctx)
                 if pr_:
                     v.e("part %s: %s" % (p.get("id"), pr_))
             if p.get("status") == "done" and not p.get("ref"):
                 v.e("part %s is done but has no ref" % p.get("id"))
+        # 3.6.2 (17.6): a part may also wait on an open decision of this judgement (no placeholder part for a question)
+        # effective status: open/overdue in the staged decisions and not closed by this judgement's `overtaken`, or raised now
+        staged_st = {d.get("id"): d.get("status") for d in snap.get("decisions") or [] if isinstance(d, dict)}
+        dids = {d["id"] for d in J.get("decisions") or [] if isinstance(d, dict) and isinstance(d.get("id"), str)
+                and not isinstance(d.get("overtaken"), dict) and (d["id"] not in staged_st or staged_st[d["id"]] in OPEN_ST)}
         for p in parts:
             if isinstance(p, dict) and p.get("status") == "stuck":
                 b = p.get("blocked_by")
-                if not isinstance(b, str) or b not in pids or b == p.get("id"):
-                    v.e("part %s is stuck: blocked_by must name another part id" % p.get("id"))
-            elif isinstance(p, dict) and "blocked_by" in p and (not isinstance(p["blocked_by"], str) or p["blocked_by"] not in pids):
-                v.e("part %s blocked_by must name a part id" % p.get("id"))
+                if not isinstance(b, str) or b == p.get("id") or (b not in pids and b not in dids):
+                    v.e("part %s is stuck: blocked_by must name another part id or an open decision id" % p.get("id"))
+            elif isinstance(p, dict) and "blocked_by" in p and (not isinstance(p["blocked_by"], str) or (p["blocked_by"] not in pids
+                                                                                                     and p["blocked_by"] not in dids)):
+                v.e("part %s blocked_by must name a part id or an open decision id" % p.get("id"))
 
     phase_ids = {ph["id"] for ph in plan.get("phases", [])} if isinstance(plan, dict) else set()
     if not isinstance(J.get("current_phase"), str) or J["current_phase"] not in phase_ids:
         v.e("current_phase must be one of the plan's phase ids")
     ups = J.get("criteria_updates", [])
     if v.lst(ups, "criteria_updates", 0, 64):
-        crit = {c["id"] for ph in plan.get("phases", []) for c in ph.get("criteria", [])} if isinstance(plan, dict) else set()
-        seen = set()
+        cmap = {c["id"]: c for ph in plan.get("phases", []) for c in ph.get("criteria", [])} if isinstance(plan, dict) else {}
+        crit = set(cmap)
+        seen, n_ret = set(), 0
         for u in ups:
+            if isinstance(u, dict) and "retired" in u:   # 17.2: retire an active open criterion that no longer applies
+                if not v.obj(u, "criteria_updates entry", ("id", "retired", "why"), ("done",)):
+                    continue
+                if u["id"] not in crit:
+                    v.e("criteria_updates: unknown criterion %r" % str(u["id"])[:20])
+                elif u["id"] in seen:
+                    v.e("criteria_updates: duplicate %s" % u["id"])
+                elif cmap[u["id"]].get("retired"):
+                    v.e("criteria_updates %s is already retired" % u["id"])
+                elif cmap[u["id"]].get("done"):
+                    v.e("criteria_updates %s is done: a shipped criterion is never retired" % u["id"])
+                seen.add(u["id"])
+                if u["retired"] is not True or u.get("done", False) is not False:
+                    v.e("criteria_updates %s: retired must be true (and done false)" % u["id"])
+                v.s(u["why"], "criteria_updates %s why" % u["id"], 100)
+                n_ret += 1
+                continue
             if not v.obj(u, "criteria_updates entry", ("id", "done"), ("ref",)):
                 continue
             if u["id"] not in crit:
                 v.e("criteria_updates: unknown criterion %r" % str(u["id"])[:20])
             elif u["id"] in seen:
                 v.e("criteria_updates: duplicate %s" % u["id"])
+            elif cmap[u["id"]].get("retired"):
+                v.e("criteria_updates %s is retired: only a FULL rebuild can bring it back" % u["id"])
             seen.add(u["id"])
             v.boolean(u["done"], "criteria_updates %s done" % u["id"])
             ref = u.get("ref")
             if ref is not None and not isinstance(ref, str):
                 v.e("criteria_updates %s ref must be a string or null" % u["id"])
             elif u.get("done") is True:
-                pr_ = ref_problem(root, repos, ref) if ref else "done needs a ref"
+                pr_ = completion_problem(root, repos, u["id"], ref, ctx) if ref else "done needs a ref"
                 if pr_:
                     v.e("criteria_updates %s: %s" % (u["id"], pr_))
+        if n_ret > RETIRE_MAX:
+            v.e("criteria_updates retires %d criteria; at most %d per judgement" % (n_ret, RETIRE_MAX))
     eta = J.get("eta")
     if eta is not None and v.obj(eta, "eta", ("low", "high", "unit", "basis", "confidence")):
         if v.integer(eta["low"], "eta.low") and v.integer(eta["high"], "eta.high") and eta["high"] < eta["low"]:
@@ -1329,7 +1492,23 @@ def diff_changes(prev, S, t):
             add(d["id"], d["id"], "question or options changed")
     if prev.get("risks") != S["risks"]:
         add("risks", "Risks", "changed")
-    return out[:8]
+    ev = plan_events(prev, S, t)   # 17.2: retirements and revivals are never cut by the cap of the other changes
+    return ev[:8] + out[:max(0, 8 - len(ev))]
+
+
+def plan_events(prev, S, t):
+    """17.2: [{id, label, text, to, at}] for every criterion retired or revived between the previous and the new state (original
+    text, reason). Kept ahead of every other change and copied into the history on their own."""
+    old_ret = {c["id"] for ph in (prev or {}).get("phases", []) for c in ph.get("criteria", []) if isinstance(c, dict) and c.get("retired")}
+    ev = []
+    for ph in S["phases"]:
+        for c in ph.get("criteria", []):
+            if isinstance(c, dict) and c.get("retired") and c["id"] not in old_ret:
+                ev.append({"id": c["id"], "label": c["id"], "to": "retired", "at": t,
+                           "text": C.trim("retired (no longer applies: %s): %s" % ((c["retired"] or {}).get("why", ""), c.get("text", "")), 200)})
+            elif isinstance(c, dict) and not c.get("retired") and c.get("id") in old_ret:
+                ev.append({"id": c["id"], "label": c["id"], "to": "open", "at": t, "text": C.trim("revived: %s" % c.get("text", ""), 200)})
+    return ev
 
 
 def merge_decisions(J, snap, prev, root=None, drift=None):
@@ -1424,6 +1603,11 @@ def build_since(snap, J, decisions, judged_seen):
            "changes": copy.deepcopy(block.get("changes", [])), "attention": att, "not_checked": list(block.get("not_checked", []))}
     if was is not None:
         out["attention_judged"] = was
+    if base.get("rewritten") is True:
+        out["rewritten"] = True   # 17.4: the history the previous assessment saw was rewritten; brief and page say so
+    if base.get("count_unknown") is True:
+        out["count_unknown"] = True   # 17.4: the count is a sample, not the new work
+        out["count_why"] = base.get("count_why") if base.get("count_why") in ("missing", "shallow", "failed") else "failed"
     return out
 
 
@@ -1486,7 +1670,8 @@ def _release_unverified(S):
     return False
 
 
-ATT_WORD = {"unchecked": "not fully checked"}   # 3.6.1: the owner-facing word for an attention kind (the others read as they are)
+ATT_WORD = {"unchecked": "not fully checked"}
+RETIRE_MAX = 3   # 17.2: criteria one judgement may retire   # 3.6.1: the owner-facing word for an attention kind (the others read as they are)
 
 
 def omitted_work(seen):
@@ -1506,6 +1691,8 @@ def omitted_work(seen):
         out.append("%d repos not read" % seen["repos_cut"])
     if seen.get("watch_moved_cut"):
         out.append("%d changed watch files not read" % seen["watch_moved_cut"])
+    if seen.get("criteria_cut"):
+        out.append("%d checklist items not shown" % seen["criteria_cut"])
     return [C.trim(x, 40) for x in out]
 
 
@@ -1536,6 +1723,8 @@ def assurance(S):
     rc = ev.get("recheck") if isinstance(ev, dict) else None
     if isinstance(rc, dict) and isinstance(rc.get("done"), int) and isinstance(rc.get("n"), int) and rc["done"] < rc["n"]:
         why.append(C.trim("publication recheck %d of %d" % (rc["done"], rc["n"]), 40))
+    if (S.get("since") or {}).get("count_unknown") is True:
+        why.append("new-work count unknown")   # 17.4
     att = ((S.get("since") or {}).get("attention") or {}).get("kind")
     if att is None:
         why.append("attention not assessed")
@@ -1613,7 +1802,10 @@ def build_state(ctx):
         intent["drift"] = drift
     # 15.1: the completion evidence of the FINAL plan and parts, with the publication's own checks in it; the key is rebased to the
     # ids still lost in what is published (the carried unlisted ones, the recheck's new losses), so the next run knows what remains
-    evidence, lost_pairs, ok_pairs = build_evidence(snap, J, ctx["plan"], ctx.get("recheck"))
+    evidence, lost_pairs, ok_pairs = build_evidence(snap, J, ctx["plan"], ctx.get("recheck"), ctx.get("ref_unknown") or ())
+    binds = bind_evidence(root, snap.get("repos") or [], completion_items(ctx["plan"], J["parts"]),
+                          (prev or {}).get("evidence_bind") if isinstance(prev, dict) else None,
+                          state_completion_items(prev), ctx.get("ref_resolved"), ctx.get("bind_deadline"))
     key["evidence_lost"] = sorted({i for i, _r in lost_pairs})
     # I1: a mark the previous state carries on an item this judgement leaves as it was stays until that very ref verified ok (staged or
     # validated just now), the item is reopened or removed, or it has a new ref: an unknown or unvisited result clears nothing
@@ -1660,6 +1852,8 @@ def build_state(ctx):
     S["changes"] = diff_changes(prev, S, t) if prev else []
     S["judged_seen"] = ctx.get("judged_seen")   # what the model saw of the staged snapshot (13.3); None = unknown
     S["judged_pack"] = ctx.get("judged_pack")   # 3.6.1: the revision of that pack (pm_collect.PACK_REV); None = before 3.6.1
+    if binds:
+        S["evidence_bind"] = binds   # 17.3: each completion commit is checked in the repository it was accepted in
     rd = read_point(snap, S["judged_seen"], ctx["genstr"])   # 16.6: where the next commit window starts
     if rd is not None:
         S["read"] = rd
@@ -1679,6 +1873,9 @@ def build_state(ctx):
     opened = [d["id"] for d in decs if d["id"] not in {x["id"] for x in (prev or {}).get("decisions", [])} and d["status"] == "open"]
     closed = [d["id"] for d in decs if d["status"] in CLOSED_ST]
     hchanged = [{k: c[k] for k in ("id", "label", "text")} for c in S["changes"]]
+    for e in plan_events(prev, S, t) if prev else []:   # 17.2: a retirement or revival reaches the history even if changes were cut
+        if not any(c["id"] == e["id"] for c in hchanged):
+            hchanged.append({k: e[k] for k in ("id", "label", "text")})
     for d in decs:   # the history keeps the closing even when the changes list was cut or reset (legacy base)
         if d["status"] == "overtaken" and not any(c["id"] == d["id"] for c in hchanged):
             hchanged.append({"id": d["id"], "label": d["id"], "text": "overtaken: %s" % d.get("overtaken_why", "")})

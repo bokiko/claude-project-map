@@ -29,6 +29,7 @@ PACK_MAX = 8192
 PACK_REV = 2        # 3.6.1: the pack revision; a judgement that read a CUT pack of an older revision is redone once (facts decide)
 DIRTY_LIST = 20     # changed files the snapshot lists one by one (work first, hidden folders last)
 DIRTY_DIRS_MAX = 12  # folder counts for the changed files not listed one by one
+CRITERIA_MAX = 30   # 3.6.2: open checklist items the pack lists (current phase first)
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -103,9 +104,11 @@ def gcall(repo, sub, *args, timeout=20.0):
     return rc, out
 
 
-def log_records(repo, n, paths=(), timeout=20.0):
-    """-> [(sha40, epoch, subject)] newest first, via the fixed internal format (%x1e record separator)."""
+def log_records(repo, n, paths=(), timeout=20.0, rng=None):
+    """-> [(sha40, epoch, subject)] newest first, via the fixed internal format (%x1e record separator). `rng`: "<sha>..HEAD"."""
     args = ["--format=%x1e%H%x1f%ct%x1f%s", "-n", str(max(1, min(int(n), 200)))]
+    if rng:
+        args.append(rng)
     if paths:
         args += ["--"] + list(paths)
     _, out = gcall(repo, "log", *args, timeout=timeout)
@@ -795,29 +798,51 @@ def collect_repo(root, rp, prev_head, watch_rel, git_timeout, rel_cache=None):
     for p in paths:
         h.update(("%s\0%s\n" % (p, _stat_sig(os.path.join(real, p)))).encode("utf-8", "replace"))
     info["dirty"] = len(paths)
-    # commits since the judged head: ONE log call (-n once), walked until the judged head is met
-    recs = log_records(repo, 200 if prev_head else MAX_COMMITS, scope and ["."] or (), git_timeout) if head else []
-    count, listed = len(recs), recs
+    # 3.6.2 (17.4): the commits since the window start P (the judged head, or 16.6's held start) are the exact revision set
+    # P..HEAD -- reachable from HEAD and not from P -- whether or not P is an ancestor (a reset, rebase or rewritten merge), listed
+    # newest first and bounded as before; the count comes from rev-list (or the bounded listing in a scoped sub-folder)
     if not head:
         count, listed = 0, []
-    elif prev_head and prev_head == head[:12]:
+    elif not prev_head:
+        listed = log_records(repo, MAX_COMMITS, scope and ["."] or (), git_timeout)
+        count = len(listed)
+    elif prev_head == head[:12]:
         count, listed = 0, []
-    elif prev_head:
-        idx = next((i for i, r in enumerate(recs) if r[0].startswith(prev_head)), None)
-        if idx is not None:
-            count, listed = idx, recs[:idx]
-        else:
-            rc, _ = grun(repo, "merge-base", "--is-ancestor", prev_head, "HEAD", timeout=git_timeout)
-            if rc == 0:
-                count, listed = len(recs), recs
-                if not sub:
-                    rc2, o2 = grun(repo, "rev-list", "--count", "%s..HEAD" % prev_head, timeout=git_timeout)
-                    if rc2 == 0 and o2.strip().isdigit():
-                        count = int(o2.strip())
-            else:
-                info["rewritten"] = True
-                listed = recs[:20]
-                count = len(listed)
+    else:
+        # exact only in a clone that is NOT shallow, when P is a commit here, its ancestry is answered (0: in HEAD's history; 1: it
+        # left it) and the listing and count succeed; anything else is ONE fallback: the latest 20 as a sample, the count unknown,
+        # with the reason (17.4)
+        try:
+            kind, poid = G.object_info(repo, prev_head, timeout=git_timeout)
+        except G.GitArgError:
+            kind, poid = "unknown", None
+        why_unknown = {"missing": "missing", "ambiguous": "missing", "other": "missing"}.get(kind, "failed")
+        exact = False
+        shallow = G.is_shallow(repo, timeout=git_timeout) if kind == "commit" else False
+        if kind == "commit" and shallow is not False:   # J1: a shallow boundary can hide a merged side chain even when P is reached
+            why_unknown = "shallow" if shallow else "failed"
+        elif kind == "commit" and HEX40.match(poid):   # a SHA-256 repository is sampled (its ids are outside the internal grammar)
+            why_unknown = "failed"
+            rc_a, _ = grun(repo, "merge-base", "--is-ancestor", poid, "HEAD", timeout=git_timeout)
+            if rc_a in (0, 1):
+                try:
+                    listed = log_records(repo, 200, scope and ["."] or (), git_timeout, rng=poid + "..HEAD")
+                    count = len(listed)
+                    exact = True
+                    if not sub:
+                        rc2, o2 = grun(repo, "rev-list", "--count", "%s..HEAD" % poid, timeout=git_timeout)
+                        if rc2 == 0 and o2.strip().isdigit():
+                            count = int(o2.strip())
+                        else:
+                            exact = False
+                except GitCollectError:
+                    exact = False
+                if exact and rc_a == 1:
+                    info["rewritten"] = True   # P is not in HEAD's complete history: a reset, rebase or force-push happened since
+        if not exact:
+            info["count_unknown"] = why_unknown
+            listed = log_records(repo, 20, scope and ["."] or (), git_timeout)
+            count = len(listed)
     listed = listed[:MAX_COMMITS]
     if not prev_head:
         count = len(listed)
@@ -1309,7 +1334,7 @@ def empty_evidence():
 
 
 def _repo_probe(root, r, sha, t):
-    """One repository row against a commit: ok | absent | moved | unknown. A repository is `moved` when its recorded path is no
+    """One repository row against a commit: ok | unreachable (3.6.2) | absent | moved | unknown. A repository is `moved` when its recorded path is no
     longer a directory under ROOT (removed, or replaced by a link elsewhere); a failing query is `absent` only when the
     repository itself still answers (git can name its toplevel), otherwise `unknown`."""
     prob, rp = VAL._confined(root, r.get("path") if isinstance(r.get("path"), str) else "", "repo path")
@@ -1323,15 +1348,19 @@ def _repo_probe(root, r, sha, t):
         return "unknown"
     if not isdir:
         return "moved"
-    try:
-        rc, out = G.run(rp, "cat-file", "-t", sha, timeout=t)
+    try:   # 3.6.2 (17.3): a commit object that survives a reset is not evidence; HEAD's history must still contain it
+        st, _oid = G.commit_reach(rp, sha, timeout=t)
     except G.GitArgError:
         return "unknown"
-    if rc == 0:
-        return "ok" if out.strip() == "commit" else "absent"
-    if rc in (1, 128):
+    if st == "absent":
         return "absent" if G.toplevel(rp, timeout=t) else "unknown"
-    return "unknown"   # 124 timeout, 127 no git, anything else
+    return st   # ok | unreachable | unknown (a failed, ambiguous or timed-out query)
+
+
+def valid_bind(b):
+    """17.3: a completion commit ref's binding {repo: <repos path>, oid: <40 hex>}."""
+    return isinstance(b, dict) and isinstance(b.get("repo"), str) and bool(b["repo"]) and isinstance(b.get("oid"), str) \
+        and HEX40.match(b["oid"]) is not None
 
 
 def evidence_repos(repos, state):
@@ -1344,7 +1373,7 @@ def evidence_repos(repos, state):
     return list(repos) + extra
 
 
-def check_ref(root, repos, ref, deadline=None):
+def check_ref(root, repos, ref, deadline=None, bind=None):
     """-> (status, why). status ok | lost | unknown; why is one of EVID_WHY for lost. 15.1: `file:` -> lstat of the confined path is
     a regular file and a given line exists; `commit:` -> cat-file in the confined repositories. Absence is only what a successful
     query documents (ENOENT, a cat-file answer from a repository that still works)."""
@@ -1382,6 +1411,14 @@ def check_ref(root, repos, ref, deadline=None):
         if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
             return "lost", "commit missing"
         t = 5.0 if deadline is None else max(0.3, min(5.0, deadline - time.monotonic()))
+        if valid_bind(bind) and bind["oid"].startswith(sha):   # 17.3: the repository the claim was accepted in, never another one
+            rows = [r for r in repos if isinstance(r, dict) and r.get("path") == bind["repo"]] or [{"path": bind["repo"], "vcs": "git"}]
+            st = _repo_probe(root, dict(rows[0], vcs="git"), bind["oid"], t)
+            if st == "ok":
+                return "ok", ""
+            if st == "unknown":
+                return "unknown", ""
+            return "lost", {"unreachable": "commit not in history", "moved": "repo moved"}.get(st, "commit missing")
         seen = set()
         for r in repos:
             if isinstance(r, dict) and r.get("vcs") == "git":
@@ -1391,6 +1428,8 @@ def check_ref(root, repos, ref, deadline=None):
                 seen.add(st)
         if "unknown" in seen:
             return "unknown", ""
+        if "unreachable" in seen:   # the object exists but HEAD does not reach it: the work left the checked-out history
+            return "lost", "commit not in history"
         return "lost", "repo moved" if "moved" in seen else "commit missing"
     return "lost", "file missing"
 
@@ -1412,7 +1451,7 @@ def _evidence_gate():
         time.sleep(0.02)
 
 
-def check_evidence(root, repos, items, cache, deadline, gen, only=None, held=False, limit=EVID_CAP):
+def check_evidence(root, repos, items, cache, deadline, gen, only=None, held=False, limit=EVID_CAP, binds=None):
     """THE evidence scheduler (facts' collect, embed's mechanical collect and the publication recheck all use it). `items` =
     the completion refs [(id, ref)] of the pinned generation `gen`; the pass checks at most `limit` of them (or of `only`, a
     subset, for the recheck), least recently checked first (unvisited first, then the lowest epoch, ties by id), until the
@@ -1457,7 +1496,7 @@ def check_evidence(root, repos, items, cache, deadline, gen, only=None, held=Fal
         for k in pool[:limit]:
             if deadline is not None and time.monotonic() >= deadline:
                 break
-            st, why = check_ref(root, repos, keys[k][1], deadline)
+            st, why = check_ref(root, repos, keys[k][1], deadline, bind=(binds or {}).get(k) if isinstance(binds, dict) else None)
             ran[k] = {"status": st, "why": why}
             mine["results"][k] = {"status": st, "why": why, "at": C.iso(), "epoch": epoch}
         merged = evidence_merge(stored, mine, set(keys))
@@ -1644,7 +1683,8 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
         del fpc[k]
     # 15.1: the completion refs of the pinned state, a few per run (the scheduler is shared with embed and the publication recheck)
     ev_items = evidence_items(prev["state"]) if prev.get("kind") == "v4" else []
-    evidence, _ran = check_evidence(root, evidence_repos(repos, prev.get("state")), ev_items, cache, hd, prev.get("gen"), held=evidence_held)
+    evidence, _ran = check_evidence(root, evidence_repos(repos, prev.get("state")), ev_items, cache, hd, prev.get("gen"), held=evidence_held,
+                                    binds=(prev.get("state") or {}).get("evidence_bind") if prev.get("kind") == "v4" else None)
 
     lname = pj.get("ledger") if isinstance(pj.get("ledger"), str) else None
     ledger = parse_ledger(root, lname)
@@ -1697,6 +1737,13 @@ def collect(root, prev, hash_deadline, cache, git_timeout=20.0, want_usage=False
     }
     snap["since"] = since_baseline(prev, t, snap["commits"]["count"], len(dirty), base_from)
     snap["window_heads"] = window_heads   # 16.6: where this commit window started, per repository (read by build_state)
+    snap["criteria"], snap["criteria_phase"] = open_criteria(prev)   # 17.1: the checklist every judgement must see
+    if isinstance(snap["since"], dict) and any(r.get("rewritten") for r in repos):
+        snap["since"]["rewritten"] = True   # 17.4: the history the previous assessment saw was rewritten
+    cu = [r.get("count_unknown") for r in repos if r.get("count_unknown")]
+    if isinstance(snap["since"], dict) and cu:   # 17.4: the count is a sample; why (missing | shallow | failed), first repository's
+        snap["since"]["count_unknown"] = True
+        snap["since"]["count_why"] = cu[0] if cu[0] in ("missing", "shallow", "failed") else "failed"
     return snap
 
 
@@ -1715,6 +1762,26 @@ def _heads_ok(h, jh):
     h, jh = _heads_norm(h), _heads_norm(jh)
     return isinstance(h, dict) and bool(h) and h != jh and all(isinstance(r, str) and isinstance(v, str) and (v == "" or HEAD_RE.match(v))
                                                                for r, v in h.items())
+
+
+def open_criteria(prev):
+    """3.6.2 (17.1): the plan's ACTIVE open criteria [{id, text}] (full text), the current phase first, then plan order, and that
+    phase id. An UPDATE reads no plan.json, so without this list it could never close (or retire) an item it was not told about."""
+    plan = prev.get("plan") if prev.get("kind") == "v4" else None
+    if not isinstance(plan, dict) or not isinstance(plan.get("phases"), list):
+        return [], None
+    S = prev.get("state") if isinstance(prev.get("state"), dict) else {}
+    J = prev.get("judgement") if isinstance(prev.get("judgement"), dict) else {}
+    cur = (S.get("focus") or {}).get("phase") if isinstance(S.get("focus"), dict) else None   # the EFFECTIVE phase (I4)
+    if not isinstance(cur, str):
+        cur = J.get("current_phase") if isinstance(J.get("current_phase"), str) else None
+    rows = []
+    for ph in plan["phases"]:
+        for c in (ph.get("criteria") if isinstance(ph, dict) else None) or []:
+            if isinstance(c, dict) and isinstance(c.get("id"), str) and c.get("done") is False and not c.get("retired"):
+                rows.append({"id": c["id"], "text": c.get("text") if isinstance(c.get("text"), str) else ""})
+    first = [r for r in rows if cur and r["id"].startswith(cur + ".")]
+    return first + [r for r in rows if r not in first], cur
 
 
 def window_base(root, prev):
@@ -1905,6 +1972,8 @@ def build_pack(snap, inv_name):
     p.update({k: snap[k] for k in ("repos", "commits", "status", "watch", "ledger", "answers", "decisions", "usage", "watch_dropped",
                                    "dirty_paths", "template_hash")})
     p["dirty_dirs"] = snap.get("dirty_dirs") or []   # a snapshot staged before 3.6.1 has none: its unlisted files count as not seen
+    if isinstance(snap.get("criteria"), list):   # 17.1: open checklist items; a snapshot staged before 3.6.2 has none
+        p["criteria"] = [{"id": c["id"], "text": c["text"]} for c in snap["criteria"][:CRITERIA_MAX] if isinstance(c, dict)]
     p = C.loads(C.dumps(p))   # deep copy
     if isinstance(p.get("usage"), dict):   # 3.6.1: totals only; the per-model and per-job detail is page material, never the model's
         p["usage"] = {k: v for k, v in p["usage"].items() if k not in ("by_model", "jobs")}
@@ -1990,6 +2059,15 @@ def build_pack(snap, inv_name):
                 if isinstance(o, dict) and C.blen(o.get("label", "")) > 60:
                     o["label"] = C.trim(o["label"], 60)
 
+    def criteria_current():   # 17.1: keep the current phase's items only
+        cur = snap.get("criteria_phase")
+        if isinstance(p.get("criteria"), list):
+            p["criteria"] = [c for c in p["criteria"] if isinstance(cur, str) and c["id"].startswith(cur + ".")]
+
+    def criteria_none():
+        if isinstance(p.get("criteria"), list):
+            p["criteria"] = []
+
     def fold_dirty():   # every listed changed file joins its folder count: nothing is lost at folder level, so this is no cut
         cnt = {r["dir"]: r["n"] for r in p["dirty_dirs"]}
         p["dirty_dirs"] = dirty_dirs(p["dirty_paths"], cnt)
@@ -2006,7 +2084,7 @@ def build_pack(snap, inv_name):
             if isinstance(r.get("release"), dict):
                 r["release"] = {"head_tags_total": r["release"].get("head_tags_total"), "trimmed": True}
 
-    steps = [cut_recent, cut_watch, fold_dirty, cut_notes, cut_decisions, cut_ledger, drop_answers,
+    steps = [cut_recent, cut_watch, fold_dirty, cut_notes, cut_decisions, cut_ledger, drop_answers, criteria_current, criteria_none,
              lambda: cut_items(5), lambda: cut_items(2), lambda: cut_items(1), lambda: cut_items(0),
              lambda: p["watch"].__setitem__(slice(40, None), []),
              lambda: p["repos"].__setitem__(slice(8, None), []), lambda: p.update(watch_dropped=p["watch_dropped"][:5]),
@@ -2070,11 +2148,15 @@ def compute_seen(snap, p):
             "decisions_cut": dec_cut,
             "answers_dropped": max(0, len((snap.get("answers") or {}).get("pending") or []) - len((p.get("answers") or {}).get("pending") or [])),
             "ledger_cut": ledger_cut, "repos_cut": max(0, len(snap.get("repos") or []) - len(p.get("repos") or [])),
-            "watch_moved": len(moved), "watch_moved_cut": sum(1 for q in moved if q not in listed)}
+            "watch_moved": len(moved), "watch_moved_cut": sum(1 for q in moved if q not in listed),
+            **({"criteria_cut": max(0, len(snap["criteria"]) - len(p.get("criteria") or []))}   # 17.1: initial cap included
+               if isinstance(snap.get("criteria"), list) else {})}
 
 
 def valid_seen(x):
-    """A `seen` record as stored in a pack (shape check for embed, which reads it back from STAGE/pack.json)."""
-    return isinstance(x, dict) and set(x) == set(SEEN_KEYS) \
+    """A `seen` record as stored in a pack (shape check for embed, which reads it back from STAGE/pack.json). 3.6.2 adds
+    `criteria_cut`; a pack staged before 3.6.2 has the older key set."""
+    keys = set(x) if isinstance(x, dict) else set()
+    return keys in (set(SEEN_KEYS), set(SEEN_KEYS) | {"criteria_cut"}) \
         and all(isinstance(x[k], bool) if k == "ledger_cut" else (isinstance(x[k], int) and not isinstance(x[k], bool) and x[k] >= 0)
-                for k in SEEN_KEYS)
+                for k in keys)

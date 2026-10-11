@@ -248,8 +248,13 @@ def staged_judgement(prev):
     """judgement.in.json: the previously accepted judgement, minus the decisions that are retired in the pinned state. A
     mechanical refresh retires a closed decision (answered, defaulted, overtaken) from the state, the brief and the pack, and its
     id is never reused; the judgement it left behind still lists it, so an agent that copied that file verbatim would be refused
-    (`decision id D-00N was retired`). Only decisions[] changes; open and still-listed closed decisions stay as they were."""
+    (`decision id D-00N was retired`). Only decisions[] changes (and criteria_updates is emptied, 17.1); open and still-listed
+    closed decisions stay as they were."""
     J = prev["judgement"]
+    if isinstance(J, dict) and J.get("criteria_updates"):
+        # 3.6.2 (17.1): criteria_updates are deltas the plan already carries; re-sending them made the model copy them forward
+        # instead of judging the checklist the pack now lists
+        J = dict(J, criteria_updates=[])
     if not isinstance(J, dict) or not isinstance(J.get("decisions"), list):
         return J
     S = prev["state"] if isinstance(prev.get("state"), dict) else {}

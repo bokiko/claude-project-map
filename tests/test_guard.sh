@@ -519,6 +519,15 @@ bash_t block "$CHD"
 bash_t block "$CHM"
 fbash_t allow "$CHD"
 fbash_t allow "$CHM"
+# 3.6.2: the same two exact commands with a Linux Chrome/Chromium at a fixed path (FULL only); nothing else changes
+for LCH in /usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser; do
+  fbash_t allow "$LCH --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --screenshot=$STF/shot-desktop.png file://$PROJ/.project-map/index.html"
+  fbash_t allow "$LCH --headless=new --disable-gpu --hide-scrollbars --window-size=390,844 --screenshot=$STF/shot-mobile.png file://$PROJ/.project-map/index.html"
+  bash_t block "$LCH --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --screenshot=$STF/shot-desktop.png file://$PROJ/.project-map/index.html"
+done
+fbash_t block "/usr/bin/google-chrome --no-sandbox --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --screenshot=$STF/shot-desktop.png file://$PROJ/.project-map/index.html"
+fbash_t block "/usr/local/bin/chromium --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --screenshot=$STF/shot-desktop.png file://$PROJ/.project-map/index.html"
+fbash_t block "/usr/bin/google-chrome --headless=new --disable-gpu --hide-scrollbars --window-size=1440,900 --screenshot=$STF/shot-desktop.png file://$OTHER/.project-map/index.html"
 fbash_t block "$CHD; ls"
 fbash_t block "$CHD --remote-debugging-port=9222"
 fbash_t block "$CHD --user-data-dir=/tmp/p"
@@ -546,9 +555,10 @@ fwrite_t allow "$STF/plan.out.json" '{}'
 write_t allow "$MEM/MEMORY.md" '# mem'
 write_t allow "$MEM/feedback_x.md" 'x'
 write_t allow "$MEM/new-note.md" 'x'
-write_t allow "$PROJ/.gitignore" $'node_modules\n.project-map/\n'
-edit_t  allow "$PROJ/.gitignore" 'node_modules' $'node_modules\n.project-map/'
-edit_t  allow "$PROJ/.gitignore" $'node_modules\n' $'node_modules\n.project-map/\n'
+# 3.6.2 (17.5): the map agent never writes the project's .gitignore any more (embed uses the local exclude file)
+write_t block "$PROJ/.gitignore" $'node_modules\n.project-map/\n'
+edit_t  block "$PROJ/.gitignore" 'node_modules' $'node_modules\n.project-map/'
+edit_t  block "$PROJ/.gitignore" $'node_modules\n' $'node_modules\n.project-map/\n'
 write_t block "$STA/judgement.json" '{}'                        # old path
 write_t block "$STA/pack.json" '{}'
 write_t block "$STA/snapshot.json" '{}'
@@ -638,15 +648,15 @@ rm -f "$MEM/linked.md"
 GI="$PROJ/.gitignore"; cp "$GI" "$TMP/gi.keep"; ln "$GI" "$TMP/gi-hl"
 write_t block "$GI" $'node_modules\n.project-map/\n'
 rm -f "$TMP/gi-hl"
-write_t allow "$GI" $'node_modules\n.project-map/\n'
+write_t block "$GI" $'node_modules\n.project-map/\n'
 printf 'no-newline' > "$GI"
-write_t allow "$GI" $'no-newline\n.project-map/\n'
+write_t block "$GI" $'no-newline\n.project-map/\n'
 write_t block "$GI" $'no-newline.project-map/\n'
 : > "$GI"
-write_t allow "$GI" $'.project-map/\n'
-edit_t  allow "$GI" '' $'.project-map/\n'
+write_t block "$GI" $'.project-map/\n'
+edit_t  block "$GI" '' $'.project-map/\n'
 rm -f "$GI"
-write_t allow "$GI" $'.project-map/\n'                          # absent file may be created
+write_t block "$GI" $'.project-map/\n'                          # not even a new file
 cp "$TMP/gi.keep" "$GI"
 
 # ================================================================= Read

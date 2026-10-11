@@ -1106,3 +1106,80 @@ coverage), `FX-window` (the window holds until read, moves on after, a new neste
 restart and its fallbacks (generation gone, generation tampered), read_point), `FX-page` (later
 decisions, the hint, the count, the plan table numbering). The wording assertions of earlier sections were updated to the new
 phrases (only wording; no expected value changed otherwise).
+
+## 17. 3.6.2: the checklist is judged every run; evidence must be in the checked-out history
+
+From a field report (Linux, a small docs repository; 1 FULL and 2 UPDATE runs while the owner committed, then `git reset --hard`
+to an upstream without that commit). Reviewed with Codex in two design rounds before implementation.
+
+17.1 The checklist reaches every judgement
+- An UPDATE reads no plan.json, so it could not see an open criterion it had never touched; `judgement.in.json` re-sent the
+  previous `criteria_updates` (deltas the plan already holds) and the model copied them forward.
+- `judgement.in.json` now carries `criteria_updates: []`.
+- `snapshot.criteria` = the plan's ACTIVE open criteria [{id, text}] (full text, current phase first, then plan order) and
+  `snapshot.criteria_phase`; `pack.criteria` lists at most `CRITERIA_MAX = 30`. Trim steps after the ledger lines and answers,
+  before commit items: the current phase only, then none. `seen.criteria_cut` = eligible items minus those the final pack shows
+  (the initial cap included), on every new pack; `valid_seen` accepts the older key set for a pack staged before 3.6.2;
+  `omitted_work` says "n checklist items not shown"; the prompt's cut conjunction includes it.
+
+17.2 Retiring a criterion that no longer applies
+- `criteria_updates` entry `{id, retired:true, why<=100}` (any judgement): only an active criterion that is not done; at most
+  `RETIRE_MAX = 3`; no duplicate; any other update to a retired id is refused (an UPDATE never revives).
+- The plan keeps it in its phase with `retired:{why, at}`; it counts in no done/total, progress or evidence. A phase with criteria
+  that are all retired is `dropped` ("No longer applies"): never blocks, never current unless every phase is settled. Page:
+  progress "k of n active · m retired" ("—" when nothing is active), phase rows "· m retired", the checklist row "no longer
+  applies · why", Plan vs shipped "Retired · why". Every retirement (and a FULL revival) is a state change with the original text.
+- FULL: `plan.out.json` may only CARRY a retirement unchanged from plan.json (`check_retired_carry`); listing a retired id
+  without the record revives it (logged); omitting it removes it like any criterion a rebuild drops.
+- Prompt: retire only when the scope changed (the history it relied on was rewritten, the thing it names was removed, the owner
+  said so), never because work is unfinished, hard or unproven.
+
+17.3 Completion evidence is the checked-out history, bound to its repository
+- `pm_git.object_info` (one completed `cat-file --batch-check`, the id on stdin): commit | other | missing (git's own answer) |
+  ambiguous | unknown (a failed, corrupt, unreadable or timed-out query is never absence). `commit_reach`: ok only when the
+  commit is an ancestor of HEAD; `unreachable` when the object survives but HEAD does not reach it (a reset, rebase or
+  force-push dropped it, or it lives only on another branch, tag or backup ref: none is evidence for the current checkout).
+- `commit_reach` answers unreachable only in a clone that is not shallow; behind a shallow boundary the answer is unknown.
+- The 3.6 evidence probe uses it: unreachable is LOST with the new reason "commit not in history" (EVID_WHY), so the report's
+  reset queues the claim for repair although the object survives. `ref_problem` refuses an unreachable commit for a new ref.
+- `state.evidence_bind = {evidence_key: {repo, oid}}`: a judged publication binds each completion commit ref to the ONE
+  repository whose checked-out history contains it (full id); a binding for the same (id, ref) is carried; a ref no repository
+  confirms, or more than one does, stays unbound (checked in every known repository, as in 3.6). A bound ref is checked only in
+  its repository with its full id, so a second clone keeping the commit cannot vouch for it. The same holds at publication
+  (`completion_problem`: parts, criteria_updates, FULL plans): a bound ref whose repository cannot answer is no error but is not
+  verified by the publication (`validated_now` excludes it), and a bound ref no longer in its repository's history is refused even
+  when another clone holds the commit. A new ref is bound where validation accepted it (no second probe); binding runs within a
+  deadline (passed down into every git call of a probe; none
+  starts after it) and leaves a ref unbound when out of time. A ref the publication could not check outranks an older staged ok. Retirements and revivals come first in the 8-change cap and always reach the
+  history (`plan_events`).
+- Prompt: a file ref proves only that the file (and line) exists; for a claim about what a file says, Read it and cite the line.
+  A repair whose why is "commit not in history": keep done only with a line read that shows the work, else not done.
+  Not in this release: freezing a cited line's text (an unchanged line number does not prove unchanged content).
+
+17.4 Rewritten history
+- The commit window is the exact revision set P..HEAD (P = the judged head or the held 16.6 start; internal grammar `log ...
+  <sha>..HEAD`; count from `rev-list --count`, or the bounded listing in a scoped sub-folder), whether or not P is an ancestor.
+- Exact only in a clone that is NOT shallow (any shallow clone can hide a merged side chain behind its boundary even when P is
+  reached), when P is a commit here, `merge-base --is-ancestor P HEAD` answers 0 or 1 (1: `rewritten`: `since.rewritten`,
+  "history rewritten" on brief, handoff and page), and the range listing and count succeed. Anything else is ONE fallback: the
+  latest 20 as a sample, `count_unknown` with `count_why` = `missing` (P missing, ambiguous or not a commit), `shallow` (a shallow clone), `failed` (a query did not answer; a SHA-256 id) -> `since.count_unknown` / `since.count_why`;
+  brief "· count unknown"; the page says why and that the latest commits are shown; assurance "new-work count unknown".
+
+17.5 No write to the project's tracked files
+- The map agent no longer appends to `.gitignore` (guard rule removed; FULL instructions and prompt updated).
+- After every publication `pm_git.ensure_local_exclude(root)`: inside a Git work tree, unless `check-ignore` already ignores the
+  folder (an older .gitignore line included), ONE anchored, escaped line `/<rel>/.project-map/` is appended to
+  `<git common dir>/info/exclude`, opened relative to pinned directory descriptors with O_NOFOLLOW (a link anywhere refuses),
+  fstat-checked (regular file, one link), append-only. Tracked map files, a re-including rule, any refused step or any git query
+  that does not answer: published anyway, with `PM_EMBED_NOTE .project-map/ is not ignored by git: <why>`. Skipped silently only
+  when git answers "false" (a bare repository, the inside of .git), when its fatal answer comes with no `.git` entry in ROOT or any
+  parent (a plain folder; a broken `.git` is reported instead), or when the work tree is the home folder's own repository. It runs within the run's remaining deadline
+  (each query at most 2 s); out of time it is deferred to the next publication with a note.
+
+17.6 Smaller
+- A stuck part's `blocked_by` may name a decision that is open/overdue in the staged decisions and not closed by this judgement's
+  `overtaken`, or one this judgement raises (no placeholder part for a question). blocked_by is not rendered; a decision answered
+  after staging leaves it until the next judgement (the reconciled attention already says "not reassessed").
+- Screenshots: the guard accepts the two exact commands with the macOS Chrome app or `/usr/bin/google-chrome`,
+  `/usr/bin/chromium`, `/usr/bin/chromium-browser`; the FULL instructions try them in that order (a missing binary just fails;
+  no discovery command, no `--no-sandbox`).

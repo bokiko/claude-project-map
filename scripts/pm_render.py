@@ -130,6 +130,10 @@ def brief(S):
             n_at or "the previous assessment", sn.get("commits") or 0, sn.get("dirty") or 0, len(sn.get("changes") or []))
         if isinstance(sn.get("listed"), int) and sn["listed"] < (sn.get("commits") or 0):
             l7 += " \u00b7 %d of %d shown" % (sn["listed"], sn["commits"])
+        if sn.get("rewritten") is True:
+            l7 += " \u00b7 history rewritten"
+        if sn.get("count_unknown") is True:
+            l7 += " \u00b7 count unknown"
         for c in (sn.get("changes") or [])[:3]:
             l8.append("- %s \u00b7 %s" % (c.get("text", ""), "committed, not verified yet" if c.get("state") == "landed" else "uncommitted"))
     ov = ["%s overtaken by events: %s (%s)" % (d["id"], C.trim(d.get("overtaken_why", ""), 120), C.trim(d.get("overtaken_ref", ""), 80))
@@ -263,6 +267,10 @@ def handoff(S):
                                                           sn.get("commits") or 0, sn.get("dirty") or 0)
         if isinstance(sn.get("listed"), int) and sn["listed"] < (sn.get("commits") or 0):
             l7 += " \u00b7 %d of %d shown" % (sn["listed"], sn["commits"])
+        if sn.get("rewritten") is True:
+            l7 += " \u00b7 history rewritten"
+        if sn.get("count_unknown") is True:
+            l7 += " \u00b7 count unknown"
         for c in (sn.get("changes") or [])[:3]:
             l8.append("- %s \u00b7 %s" % (C.trim(c.get("text", ""), 120), "committed, not verified yet" if c.get("state") == "landed" else "uncommitted"))
     ns = S.get("next_step") or {}

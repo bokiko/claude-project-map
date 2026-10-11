@@ -210,19 +210,27 @@ def finish_files(S, snap, plan, judgement, extra, tpl=TEMPLATE):
     return files
 
 
-def seed_evidence(pm, J, snap, final_plan, genstr, recheck):
+def seed_evidence(pm, J, snap, final_plan, genstr, recheck, unknown=()):
     """15.1: the checks the publication itself made are observations made under the publish lock, so they are recorded under the
     NEW generation in cache.json `evidence` (a pass of their own, one epoch up): every completion ref the validation just resolved
     (a repaired item with its new ref, every part, a FULL plan's criteria) is `ok` there. Without it the next facts run would find
     a record that has never seen them and the published state's view would flap back to partial. A ref the recheck found lost or
-    unknown is NOT seeded (that observation was written by the recheck pass and is newer than the validation)."""
+    unknown is NOT seeded (that observation was written by the recheck pass and is newer than the validation).
+    K1: a bound ref the validation could NOT check (`unknown`) is recorded as `unknown` in the same pass, unless the later recheck
+    observed it (its result is newer), so an older cached `ok` cannot restore verification before the ref's own next check."""
     items = VAL.completion_items(final_plan, J.get("parts"))
-    valid = VAL.validated_now(J, snap, final_plan)
+    valid = VAL.validated_now(J, snap, final_plan, unknown or ())
+    rechecked = {tuple(p) for p in (recheck or {}).get("checked") or []}
     for e in (recheck or {}).get("lost") or []:
         valid.discard((e["id"], e["ref"]))
+        rechecked.add((e["id"], e["ref"]))
     for pair in (recheck or {}).get("unknown") or []:
         valid.discard(tuple(pair))
-    if not items or not valid:
+        rechecked.add(tuple(pair))
+    unk = {tuple(p) for p in (unknown or ())} & set(items)
+    unk -= rechecked
+    valid -= unk
+    if not items or not (valid or unk):
         return
     cpath = os.path.join(pm, "cache.json")
     cur = C.load_json(cpath, {})
@@ -230,7 +238,8 @@ def seed_evidence(pm, J, snap, final_plan, genstr, recheck):
     stored = cur.get("evidence") if K.evidence_record_ok(cur.get("evidence")) else None
     epoch = (stored["epoch"] if stored else 0) + 1
     mine = {"set": K.evidence_set(items), "gen": genstr, "epoch": epoch,
-            "results": {C.evidence_key(i, r): {"status": "ok", "why": "", "at": C.iso(), "epoch": epoch} for i, r in valid}}
+            "results": dict({C.evidence_key(i, r): {"status": "ok", "why": "", "at": C.iso(), "epoch": epoch} for i, r in valid},
+                            **{C.evidence_key(i, r): {"status": "unknown", "why": "", "at": C.iso(), "epoch": epoch} for i, r in unk})}
     cur["evidence"] = K.evidence_merge(stored, mine, {C.evidence_key(i, r) for i, r in items})
     try:
         C.atomic_write(cpath, C.dumps(cur))
@@ -362,14 +371,16 @@ def evidence_recheck(root, snap, final_plan, J, prevp, cache, cur, clock):
     ok_pairs = [(e["id"], e["ref"]) for e in (snap.get("evidence") or {}).get("ok") or [] if (e["id"], e["ref"]) in final]
     if not ok_pairs:
         return None
-    out = {"done": 0, "n": len(ok_pairs), "lost": [], "unknown": []}
+    out = {"done": 0, "n": len(ok_pairs), "lost": [], "unknown": [], "checked": []}   # checked: every pair this pass observed (K1)
     items = K.evidence_items(prevp["state"]) if prevp["kind"] == "v4" else []
     by_key = {C.evidence_key(i, r): (i, r) for i, r in ok_pairs}
     dl = time.monotonic() + float(os.environ.get("PM_EMBED_EVIDENCE_DEADLINE") or min(20.0, clock.remaining()))
     _view, ran = K.check_evidence(root, K.evidence_repos(snap.get("repos", []), prevp["state"] if prevp["kind"] == "v4" else None), items, cache,
-                                  dl, cur, only=ok_pairs, held=True)
+                                  dl, cur, only=ok_pairs, held=True,
+                                  binds=prevp["state"].get("evidence_bind") if prevp["kind"] == "v4" else None)
     for k, r in ran.items():
         i, ref = by_key[k]
+        out["checked"].append((i, ref))
         if r["status"] == "unknown":
             out["unknown"].append((i, ref))
         else:
@@ -434,6 +445,7 @@ def embed_normal(root, inv_name, clock):
                 raise EmbedError("plan.out.json is not valid JSON: %s" % str(ex)[:80])
             # structure only here: the completion refs of a FULL plan are checked on the FINAL plan (after criteria_updates), below
             VAL.validate_plan(v, plan, root, snap.get("repos", []), False)
+            VAL.check_retired_carry(v, plan, plan_in)   # 17.2: a FULL run carries retirements, never invents one
             if isinstance(plan, dict) and plan.get("generation") != inv_name:
                 v.e("plan.out.json generation does not match this invocation")
         else:
@@ -477,10 +489,10 @@ def embed_normal(root, inv_name, clock):
                 kept.append("repos")
             else:
                 J["repos"] = [r["path"] for r in snap.get("repos", []) if r["path"] != "."][:12]
-        final_plan = VAL.apply_updates(plan, J.get("criteria_updates", []))
+        final_plan = VAL.apply_updates(plan, J.get("criteria_updates", []), at=snap.get("facts_at"))
         if full:   # 15.1: a listed loss may be reopened or re-referenced by criteria_updates; the exact unlisted losses may be carried as they were
             v2 = VAL.V()
-            VAL.check_plan_refs(v2, final_plan, root, snap.get("repos", []), VAL.lost_unlisted(snap.get("evidence")))
+            VAL.check_plan_refs(v2, final_plan, root, snap.get("repos", []), VAL.lost_unlisted(snap.get("evidence")), ctx)
             if v2.errs:
                 raise EmbedError(v2.errs)
         clock.check()
@@ -559,7 +571,8 @@ def embed_normal(root, inv_name, clock):
             c = {"root": root, "snap": snap2, "J": J, "plan": final_plan, "prev": pseudo, "genstr": genstr, "base": cur,
                  "kept": kept, "judged_at": snap["facts_at"], "n": n, "stale": stale, "judged_seen": judged_seen, "judged_pack": judged_pack,
                  "staged_intent": snap.get("intent"),   # the target is frozen from the STAGED input (14.3), accepted from snap2
-                 "fit_res": ctx.get("fit_res"), "recheck": recheck}
+                 "fit_res": ctx.get("fit_res"), "recheck": recheck, "ref_unknown": ctx.get("ref_unknown"),
+                 "ref_resolved": ctx.get("ref_resolved"), "bind_deadline": time.monotonic() + min(10.0, clock.remaining() / 3)}
             S = VAL.build_state(c)
             if prevp["kind"] != "v4":
                 S["changes"] = []
@@ -571,7 +584,7 @@ def embed_normal(root, inv_name, clock):
 
         genstr = publish(pm, make, bool(legacy), clock)
         S = box["S"]
-        seed_evidence(pm, J, snap2, final_plan, genstr, recheck)
+        seed_evidence(pm, J, snap2, final_plan, genstr, recheck, ctx.get("ref_unknown"))
         cache_merge(pm, K_cache(pm))
         return genstr, len(C.read_pinned(pm, genstr, "index.html") or b""), stale, notes
     finally:
@@ -793,6 +806,12 @@ def main(argv):
         else:
             genstr, size, stale, notes = embed_normal(root, pos[1], clock)
         print("PM_EMBED_OK gen %s %d" % (genstr, size))
+        # 17.5: the local exclude file, never a tracked file (silent when it worked); within what is left of the run's deadline
+        xs, xwhy = G.ensure_local_exclude(root, timeout=2.0, deadline=time.monotonic() + max(0.0, clock.remaining() - 0.2))
+        if xs == "not_ignored":
+            notes = list(notes) + [".project-map/ is not ignored by git: %s" % xwhy]
+        elif xs == "deferred":
+            notes = list(notes) + [".project-map/ ignore check deferred: %s" % xwhy]
         if stale:
             print("PM_EMBED_STALE %s" % stale["why"])
         for n in notes:

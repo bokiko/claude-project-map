@@ -2733,11 +2733,11 @@ bf()  { lib brief "$PM/state.json" "$1"; }                               # CODE 
 RB_D3='J["decisions"].append({"id":"D-003","q":"Third question?","options":[{"id":"A","label":"Yes"},{"id":"B","label":"No"}],"recommended":"A","default":"hold","hard_rule":None,"deadline":None,"ready":True})'
 RB_CLOSE='J["decisions"][1]["overtaken"]={"why":"Owner tagged v1.0.0 and pushed by hand"}'
 RB_RDY2='J["decisions"][1]["ready"]=True'
-RB_SEEN_KEYS="['answers_dropped', 'commits', 'commits_total', 'decisions_cut', 'dirty', 'dirty_total', 'ledger_cut', 'repos_cut', 'watch_moved', 'watch_moved_cut']"
+RB_SEEN_KEYS="['answers_dropped', 'commits', 'commits_total', 'criteria_cut', 'decisions_cut', 'dirty', 'dirty_total', 'ledger_cut', 'repos_cut', 'watch_moved', 'watch_moved_cut']"
 
 # ---- RB-required: since is required exactly when the pack carries a baseline
 mkrepo rb0; begin
-t_eq "RB-required: a first map's pack has since null and the seen record" "$(get "$STAGE/pack.json" '(d["since"], sorted(d["seen"]))')" "(None, $RB_SEEN_KEYS)"
+t_eq "RB-required: a first map's pack has since null and the seen record (3.6.2: with criteria_cut)" "$(get "$STAGE/pack.json" '(d["since"], sorted(d["seen"]))')" "(None, $RB_SEEN_KEYS)"
 t_eq "RB-required: ... and the snapshot has since null too" "$(get "$STAGE/snapshot.json" 'd["since"]')" "None"
 rej "RB-required: a first map must not carry since" 'J["since"]={"changes":[],"attention":{"kind":"continue","text":"x","why":"y"}}' "since must be absent or null" full
 pub '' full
@@ -3217,7 +3217,7 @@ print(json.dumps([p["watch"], seen["watch_moved"], seen["watch_moved_cut"], len(
 PYEOF
 mkproj rbw || true; upd ''
 bump; begin
-t_eq "RB-watch-omitted: only a watched file moved, the cap dropped the whole watch list: cut counted, assurance false, qualifier shown" "$(python3 -I "$T/rb_unit4.py" "$HOOKS" "$STAGE/snapshot.json" "$PM/state.json")" '[[], 1, 1, true, {"ok": false, "why": ["1 changed watch files not read"]}, true, true]'
+t_eq "RB-watch-omitted: only a watched file moved, the cap dropped the whole watch list: cut counted, assurance false, qualifier shown (3.6.2: the dropped checklist items too)" "$(python3 -I "$T/rb_unit4.py" "$HOOKS" "$STAGE/snapshot.json" "$PM/state.json")" '[[], 1, 1, true, {"ok": false, "why": ["1 changed watch files not read", "4 checklist items not shown"]}, true, true]'
 
 # ---- RB-pubwatch: a path the judgement adds to `watch` is hashed at publication; an incomplete check is partial coverage
 mkproj rbpw || true; upd ''
@@ -3991,11 +3991,13 @@ t_eq "DR-lost-line: ... why: line past end" "$(get "$STAGE/snapshot.json" 'd["ev
 pub '' update; t_pre "DR-lost-line: the repair publishes" "$eo" "PM_EMBED_OK"
 
 # ---- DR-lost-commit: a commit that is no longer in any known repository (an absent answer from a repository that still works)
-mkrepo dr3; drfiles; (cd "$R" && git checkout -q -b side && echo s > side.txt && git add -A && git commit -qm side && git checkout -q main)
-SIDE=$(cd "$R" && git rev-parse --short=7 side); begin; pub "$(drcode "$SIDE")" full
+# 3.6.2 (17.3): evidence must be in the checked-out history, so the cited commit is on HEAD; a reset drops it and gc prunes it
+mkrepo dr3; drfiles; (cd "$R" && echo s > side.txt && git add -A && git commit -qm side)
+SIDE=$(cd "$R" && git rev-parse --short=7 HEAD); begin; pub "$(drcode "$SIDE")" full
 t_pre "DR-lost-commit: setup: the map cites a commit that exists" "$eo" "PM_EMBED_OK"
-(cd "$R" && git branch -q -D side && git reflog expire --expire=now --all && git gc -q --prune=now); begin
-t_pre "DR-lost-commit: the pruned commit is a loss" "$out" "NEEDS_JUDGEMENT completion evidence lost: P1.c3 inv "
+(cd "$R" && git reset -q --hard HEAD~1 && git reflog expire --expire=now --all && git gc -q --prune=now); begin
+t_pre "DR-lost-commit: the pruned commit is a loss" "$out" "NEEDS_JUDGEMENT"
+t_has "DR-lost-commit: ... named in the verdict" "$out" "completion evidence lost: P1.c3"
 t_eq "DR-lost-commit: ... why: commit missing" "$(get "$STAGE/snapshot.json" '[(e["id"], e["why"]) for e in d["evidence"]["lost"]]')" "[('P1.c3', 'commit missing')]"
 pub '' update; t_pre "DR-lost-commit: the repair publishes" "$eo" "PM_EMBED_OK"
 
@@ -4968,6 +4970,214 @@ if [ "$HAVE_NODE" = 1 ]; then
   t_eq "FX-page: only a ready:false decision: no card under the phase, nothing waits for the owner" "$(pj '(sorted(d["cards"]), d["count"] in ("Nothing", "None found"), "Waits for your answer" in json.dumps(d))')" "([['D-001', True, 'Not asked yet · will need your explicit answer']], True, False)"
   t_eq "FX-page: the plan table names a phase by its position in the phase list (01, 02, ...), never by its id" "$(pj 'sorted(set(x[1] for x in d["planPhase"]))')" "$(S 'sorted("%02d" % (i + 1) for i, p in enumerate(d["phases"]) if p.get("criteria"))')"
 fi
+
+# ======================================================================================================
+# 18. 3.6.2: the checklist is judged every run; evidence is the checked-out history (FX2-*), INTERFACES section 17
+# ======================================================================================================
+crit_of() { S '[(c["id"], c["done"], c.get("retired")) for ph in d["phases"] for c in ph["criteria"] if c["id"]=="'"$1"'"][0]'; }
+# ---- FX2-checklist (17.1): every judgement sees the open checklist; applied updates are not re-sent
+mkrepo fx2c; begin; pub "" full
+(cd "$R" && echo 1 >> docs/a.md && git commit -qam "step one"); begin
+t_eq "FX2-checklist: the pack lists the active open criteria, current phase first, full text" "$(get "$STAGE/pack.json" '([c["id"] for c in d["criteria"]][:2], all(len(c["text"]) > 0 for c in d["criteria"]), d["seen"]["criteria_cut"])')" "(['P2.c1', 'P2.c2'], True, 0)"
+pub 'J["criteria_updates"]=[{"id":"P2.c1","done":True,"ref":"file:PLAN.md:12"}]' update; t_pre "FX2-checklist: an update closes P2.c1" "$eo" "PM_EMBED_OK"
+(cd "$R" && echo 2 >> docs/a.md && git commit -qam "step two"); begin
+t_eq "FX2-checklist: the next staging re-sends no applied update, and the closed item left the list" "$(get "$STAGE/judgement.in.json" 'd["criteria_updates"]')|$(get "$STAGE/pack.json" '"P2.c1" in [c["id"] for c in d["criteria"]]')" "[]|False"
+mkrepo fx2m; begin
+pub 'P["phases"]=[{"id":"P%d"%p,"label":"Phase %d"%p,"criteria":[{"id":"P%d.c%d"%(p,c),"text":"Criterion %d of phase %d, with a condition that matters at the very end"%(c,p),"done":False} for c in range(1,9)]} for p in range(1,8)]; J["current_phase"]="P3"' full
+(cd "$R" && echo 1 >> docs/a.md && git commit -qam "more"); begin
+t_eq "FX2-checklist: 56 open items: the pack lists 30 (the current phase first), the other 26 are counted as not shown" "$(get "$STAGE/pack.json" '(len(d["criteria"]), d["criteria"][0]["id"], d["seen"]["criteria_cut"], d["criteria"][0]["text"].endswith("at the very end"))')" "(30, 'P3.c1', 26, True)"
+pub "" update; t_has "FX2-checklist: ... and the assurance says so" "$(S 'd["assurance"]["why"]')" "26 checklist items not shown"
+t_eq "FX2-checklist: unit: a 3.6.1 staged pack (no criteria_cut) is still a valid seen record; a stray key is not" "$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import pm_collect as K
+o={k:0 for k in K.SEEN_KEYS};o["ledger_cut"]=False
+print(K.valid_seen(o), K.valid_seen(dict(o,criteria_cut=2)), K.valid_seen(dict(o,other=1)))' "$HOOKS")" "True True False"
+
+# ---- FX2-retire (17.2): an item that no longer applies is retired, visibly, never counted, never revived by an UPDATE
+mkrepo fx2r; begin; pub "" full
+(cd "$R" && echo 1 >> docs/a.md && git commit -qam "scope change"); begin
+rej "FX2-retire: a done criterion is never retired" 'J["criteria_updates"]=[{"id":"P1.c1","retired":True,"why":"no longer needed"}]' "a shipped criterion is never retired"
+rej "FX2-retire: at most 3 per judgement" 'J["criteria_updates"]=[{"id":"P2.c%d"%i,"retired":True,"why":"scope changed"} for i in (1,2,3,4)]' "at most 3 per judgement"
+rej "FX2-retire: retired must be true" 'J["criteria_updates"]=[{"id":"P2.c1","retired":False,"why":"x"}]' "retired must be true"
+rej "FX2-retire: a why over 100 bytes" 'J["criteria_updates"]=[{"id":"P2.c1","retired":True,"why":"w"*101}]' "why"
+pub 'J["criteria_updates"]=[{"id":"P2.c2","retired":True,"why":"the reset dropped the edits it names"}]' update; t_pre "FX2-retire: retiring an open item publishes" "$eo" "PM_EMBED_OK"
+t_eq "FX2-retire: ... kept in its phase, not done, with the reason and time" "$(S '[(c["done"], c["retired"]["why"], bool(c["retired"].get("at"))) for ph in d["phases"] for c in ph["criteria"] if c["id"]=="P2.c2"][0]')" "(False, 'the reset dropped the edits it names', True)"
+t_eq "FX2-retire: ... and counted nowhere (phase total shrinks, retired count shown)" "$(S '[(p["total"], p.get("retired")) for p in d["phases"] if p["id"]=="P2"][0]')" "($(get "$STAGE/plan.json" 'len([c for ph in d["phases"] if ph["id"]=="P2" for c in ph["criteria"]]) - 1'), 1)"
+t_has "FX2-retire: ... the change log names it with its text" "$(S '[c["text"] for c in d["changes"] if c["id"]=="P2.c2"]')" "retired (no longer applies: the reset dropped the edits it names)"
+(cd "$R" && echo 2 >> docs/a.md && git commit -qam "later"); begin
+t_eq "FX2-retire: a retired item is not in the pack's checklist" "$(get "$STAGE/pack.json" '"P2.c2" in [c["id"] for c in d["criteria"]]')" "False"
+rej "FX2-retire: an UPDATE cannot close (revive) a retired item" 'J["criteria_updates"]=[{"id":"P2.c2","done":True,"ref":"file:PLAN.md:3"}]' "only a FULL rebuild can bring it back"
+rej "FX2-retire: nor retire it twice" 'J["criteria_updates"]=[{"id":"P2.c2","retired":True,"why":"again"}]' "already retired"
+if [ "$HAVE_NODE" = 1 ]; then rbpage
+  t_eq "FX2-retire: page: progress counts active items and says how many are retired; the row says it no longer applies" "$(pj '(d["progress"].endswith("active · 1 retired"), [c[1] for c in d["criteria"] if c[0]=="P2.c2"][0].endswith("no longer applies · the reset dropped the edits it names"))')" "(True, True)"
+  t_has "FX2-retire: page: Plan vs shipped says Retired" "$(pj 'd["bodies"]["Plan vs shipped"]')" "Retired · the reset dropped the edits it names"
+fi
+# FULL: a retirement is carried unchanged, never invented; listing it without the record revives it (logged)
+begin
+rej "FX2-retire: a FULL plan may not invent a retirement" "$(printf '%s' 'import json as j; P["phases"]=j.load(open(os.path.join(os.environ["STAGE"],"plan.json")))["phases"]; P["phases"][1]["criteria"][0]["retired"]={"why":"made up"}')" "a retirement can only be carried unchanged" full
+pub 'import json as j; P["phases"]=j.load(open(os.path.join(os.environ["STAGE"],"plan.json")))["phases"]' full; t_pre "FX2-retire: a FULL run that carries the plan unchanged keeps it retired" "$eo" "PM_EMBED_OK"
+t_eq "FX2-retire: ... still retired" "$(crit_of P2.c2 | cut -c1-20)" "('P2.c2', False, {'w"
+(cd "$R" && echo 3 >> docs/a.md && git commit -qam "rebuild"); begin; pub 'import json as j; P["phases"]=j.load(open(os.path.join(os.environ["STAGE"],"plan.json")))["phases"]; [c.pop("retired") for ph in P["phases"] for c in ph["criteria"] if c["id"]=="P2.c2"]' full
+t_eq "FX2-retire: a FULL run that drops the record revives it, and the change log says so" "$(crit_of P2.c2)|$(S '[c["text"][:8] for c in d["changes"] if c["id"]=="P2.c2"]')" "('P2.c2', False, None)|['revived:']"
+# a phase whose items are all retired no longer applies and never blocks
+mkrepo fx2d; begin; pub 'J["current_phase"]="P1"; P["phases"][0]["criteria"]=[{"id":"P1.c1","text":"Edits committed","done":False}]' full
+(cd "$R" && echo 1 >> docs/a.md && git commit -qam "x"); begin
+pub 'J["current_phase"]="P1"; J["criteria_updates"]=[{"id":"P1.c1","retired":True,"why":"the edits were dropped upstream"}]' update
+t_eq "FX2-retire: the only item of P1 retired: P1 no longer applies, the current phase moves on" "$(S '([(p["id"], p["state"], p["total"]) for p in d["phases"]][:2], d["focus"]["phase"])')" "([('P1', 'dropped', 0), ('P2', 'current', $(S 'len([c for p in d["phases"] if p["id"]=="P2" for c in p["criteria"]])'))], 'P2')"
+
+# ---- FX2-reach (17.3): a commit that left the checked-out history is not evidence, even if its object survives
+mkrepo fx2h; drfiles; (cd "$R" && echo s > side.txt && git add -A && git commit -qm "the edits"); X=$(cd "$R" && git rev-parse --short=7 HEAD)
+begin; pub "$(drcode "$X")" full; t_pre "FX2-reach: setup: P1.c3 cites the commit on HEAD" "$eo" "PM_EMBED_OK"
+t_eq "FX2-reach: ... bound to the root repository with its full id" "$(S '[(b["repo"], len(b["oid"])) for k, b in d["evidence_bind"].items() if k.startswith("P1.c3")]')" "[('.', 40)]"
+(cd "$R" && git branch -q backup && git reset -q --hard HEAD~1); out=$(facts)
+t_has "FX2-reach: reset away (a backup branch still holds the object): a loss" "$out" "completion evidence lost: P1.c3"
+t_eq "FX2-reach: ... why: commit not in history" "$(get "$PM/inv-${out##* }/snapshot.json" '[(e["id"], e["why"]) for e in d["evidence"]["lost"]]')" "[('P1.c3', 'commit not in history')]"
+INV=${out##* }; INVN=inv-$INV; STAGE="$PM/$INVN"
+rej "FX2-reach: a new ref to a commit outside HEAD's history is refused" 'J["criteria_updates"]=[{"id":"P2.c1","done":True,"ref":"commit:'"$X"'"}]' "not in the checked-out history"
+t_eq "FX2-reach: unit: object_info: missing is git's own answer; a failed query is unknown, never missing" "$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import pm_git as G
+print(G.object_info(sys.argv[2], "deadbee"), G.object_info(sys.argv[3], "deadbee"))' "$HOOKS" "$R" "$T")" "('missing', None) ('unknown', None)"
+# an unbound ref (a map published before 3.6.2 carries no binding) is checked in every known repository, HEAD-only too
+mkrepo fx2u; drfiles; (cd "$R" && echo s > side.txt && git add -A && git commit -qm "the edits"); X=$(cd "$R" && git rev-parse --short=7 HEAD)
+begin; pub "$(drcode "$X")" full
+lib mut "$PM/current/state.json" 'd.pop("evidence_bind", None)'; lib resign "$PM/current"
+(cd "$R" && git reset -q --hard HEAD~1); out=$(facts)
+t_eq "FX2-reach: an unbound ref whose commit left HEAD's history: lost, commit not in history" "$(get "$PM/inv-${out##* }/snapshot.json" '[(e["id"], e["why"]) for e in d["evidence"]["lost"]]')" "[('P1.c3', 'commit not in history')]"
+# a nested clone holding the same commit cannot vouch for the root's claim once the root dropped it (binding)
+mkrepo fx2b; drfiles; (cd "$R" && echo s > side.txt && git add -A && git commit -qm "the edits"); X=$(cd "$R" && git rev-parse --short=7 HEAD)
+(cd "$R" && printf 'clone2/\n' >> .gitignore && git add .gitignore && git commit -qm ignore && git clone -q "$R" clone2)
+begin; pub "$(drcode "$X")" full; t_pre "FX2-reach: setup: a nested clone also holds the commit" "$eo" "PM_EMBED_OK"
+t_eq "FX2-reach: ... the new ref is bound to the root (the repository it was accepted in)" "$(S '[b["repo"] for k, b in d["evidence_bind"].items() if k.startswith("P1.c3")]')" "['.']"
+(cd "$R" && git reset -q --hard HEAD~2); out=$(facts)
+t_has "FX2-reach: the root drops it; the clone still has it: still a loss" "$out" "completion evidence lost: P1.c3"
+
+# I1 (impl r1): a completion commit behind a shallow boundary is unknown, never lost
+mkrepo fx2sh; drfiles; (cd "$R" && echo s > side.txt && git add -A && git commit -qm "cited work"); X=$(cd "$R" && git rev-parse --short=7 HEAD)
+begin; pub "$(drcode "$X")" full
+(cd "$R" && for i in 1 2; do echo $i >> docs/a.md; git commit -qam "later $i"; done && git rev-parse HEAD~1 > .git/shallow); out=$(facts)
+t_not "FX2-reach shallow: the cited commit sits behind the shallow boundary: not a loss" "$out" "completion evidence lost"
+t_eq "FX2-reach shallow: ... it is unknown (the check is incomplete)" "$(get "$PM/inv-${out##* }/snapshot.json" '("P1.c3" in [i for i in d["evidence"]["unknown"]], d["evidence"]["lost"])' 2>/dev/null || get "$PM/inv-${out##* }/snapshot.json" '(any("P1.c3" in str(x) for x in d["evidence"]["unknown"]), d["evidence"]["lost"])')" "(True, [])"
+t_eq "FX2-reach shallow: unit: commit_reach in a shallow clone answers unknown" "$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import pm_git as G;print(G.commit_reach(sys.argv[2], sys.argv[3])[0])' "$HOOKS" "$R" "$X")" "unknown"
+rm -f "$R/.git/shallow"
+# I2 (impl r1): a bound claim whose repository cannot be read is not re-verified through another clone at publication
+if [ "$ISROOT" = 0 ]; then
+mkrepo fx2v; drfiles; printf 'repo2/\nrepo3/\n' >> "$R/.gitignore"; mkdir -p "$R/repo2"; (cd "$R/repo2" && git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && echo n > n.txt && git add -A && git commit -qm nested); (cd "$R" && git clone -q repo2 repo3 && git add -A && git commit -qm "ignore nested")
+N=$(cd "$R/repo2" && git rev-parse --short=7 HEAD)
+NPART='[p for p in J["parts"] if p["id"]=="engine"][0].update(status="done", ref="commit:'"$N"'")'
+begin; pub "$(drcode "$N")
+$NPART" full; t_pre "FX2-bind: setup: the commit of repo2 (also in its clone repo3) is cited" "$eo" "PM_EMBED_OK"
+t_eq "FX2-bind: ... bound to repo2 (the first repository in order whose history has it)" "$(S '[b["repo"] for k, b in d["evidence_bind"].items() if k.startswith("P1.c3")]')" "['repo2']"
+(cd "$R" && echo 1 >> docs/a.md && git commit -qam x); chmod 000 "$R/repo2"; begin
+pub "$NPART" update; chmod 755 "$R/repo2"
+t_pre "FX2-bind: repo2 unreadable: the carried claim publishes (unknown is not an error)" "$eo" "PM_EMBED_OK"
+t_eq "FX2-bind: ... but it is not verified through repo3: the part stays unknown and the check incomplete" "$(S '("engine" in d["evidence"]["unknown"], d["evidence"]["checked"])')" "(True, 'partial')"
+(cd "$R" && echo 2 >> docs/a.md && git commit -qam y2); begin
+t_eq "FX2-bind: J2 setup: repo2 readable again: the staged check finds the part ok" "$(get "$STAGE/snapshot.json" '"engine" in [e["id"] for e in d["evidence"]["ok"]]')" "True"
+chmod 000 "$R/repo2"; PM_EMBED_EVIDENCE_DEADLINE=0.001 pub "$NPART" update; chmod 755 "$R/repo2"
+t_eq "FX2-bind: J2: repo2 unreadable at publication and no recheck reached it: the publication's unknown outranks the staged ok" "$(S '"engine" in d["evidence"]["unknown"]')" "True"
+t_eq "FX2-bind: K1: ... and that observation is in the evidence cache (an older ok cannot come back before its own next check)" "$(evrec 'd["results"]["engine|commit:'"$N"'"]["status"]')" "unknown"
+fi
+(cd "$R" 2>/dev/null; true)
+mkrepo fx2r2; drfiles; (cd "$R" && echo s > side.txt && git add -A && git commit -qm "the edits"); X=$(cd "$R" && git rev-parse --short=7 HEAD)
+(cd "$R" && printf 'clone2/\n' >> .gitignore && git add .gitignore && git commit -qm ignore && git clone -q "$R" clone2)
+begin; pub "$(drcode "$X")" full; (cd "$R" && git reset -q --hard HEAD~2); begin
+rej "FX2-bind: after the root dropped it, re-asserting the claim is refused although the clone still has the commit" 'J["criteria_updates"]=[u for u in J.get("criteria_updates",[]) if u["id"]!="P1.c3"]+[{"id":"P1.c3","done":True,"ref":"commit:'"$X"'"}]' "not in the checked-out history of ., where it was accepted"
+
+# ---- FX2-rewrite (17.4): the new work after a rewrite is exactly P..HEAD; rewritten and unknown are said, never guessed
+mkrepo fx2w; for i in 1 2 3 4 5 6 7; do (cd "$R" && echo $i >> docs/a.md && git commit -qam "old $i"); done
+(cd "$R" && echo x >> docs/a.md && git commit -qam "local only"); begin; pub "" full
+(cd "$R" && git reset -q --hard HEAD~1 && for i in 1 2; do echo n$i >> docs/b.md; git add -A; git commit -qm "upstream $i"; done); begin
+t_eq "FX2-rewrite: reset + 2 new commits: 2 commits, not the whole history; rewritten said" "$(get "$STAGE/pack.json" '(d["since"]["commits"], sorted(i["s"] for x in d["commits"]["days"] for i in x["items"]), d["since"].get("rewritten"))')" "(2, ['upstream 1', 'upstream 2'], True)"
+pub "" update; t_has "FX2-rewrite: ... the brief counts the 2 new commits" "$(cat "$PM/brief.txt")" ": 2 commits · 0 uncommitted"
+t_has "FX2-rewrite: ... and history rewritten" "$(cat "$PM/brief.txt")" "history rewritten"
+(cd "$R" && git reset -q --hard HEAD~2); begin
+t_eq "FX2-rewrite: a reset backwards: 0 new commits, rewritten" "$(get "$STAGE/pack.json" '(d["since"]["commits"], d["since"].get("rewritten"))')" "(0, True)"
+pub "" update
+mkrepo fx2g; (cd "$R" && git checkout -q -b a && echo a > a.txt && git add -A && git commit -qm "side a" && git checkout -q main && git checkout -q -b b && echo b > b.txt && git add -A && git commit -qm "side b" && git checkout -q main && git merge -q --no-edit a b -m "merge one")
+begin; pub "" full
+(cd "$R" && git reset -q --hard HEAD~1 && git merge -q --no-edit a b -m "merge two" && echo c >> docs/a.md && git commit -qam "after merge"); begin
+t_eq "FX2-rewrite: merges re-done over the same side branches: only the new merge and the new commit, side commits not re-counted" "$(get "$STAGE/pack.json" '(d["since"]["commits"], sorted(i["s"] for x in d["commits"]["days"] for i in x["items"]))')" "(2, ['after merge', 'merge two'])"
+pub "" update
+(cd "$R" && git reset -q --hard HEAD~1 && echo e >> docs/a.md && git commit -qam "shallow other" && git rev-parse HEAD~1 > .git/shallow)
+begin
+t_eq "FX2-rewrite: a shallow clone: not called rewritten; the count is marked unknown" "$(get "$STAGE/pack.json" '(d["since"].get("rewritten"), d["since"].get("count_unknown"))')" "(None, True)"
+rm -f "$R/.git/shallow"; pub "" update
+(cd "$R" && echo f >> docs/a.md && git commit -qam "kept" && git reset -q --hard HEAD~1 && git reflog expire --expire=now --all && git gc -q --prune=now)
+lib mut "$PM/current/state.json" 'd["judged_key"]["heads"]["."]="0123456789ab"; d["read"]["heads"]["."]="0123456789ab"'; lib resign "$PM/current"; begin
+t_eq "FX2-rewrite: the previous head is gone from this clone: the latest commits are a sample and the count is unknown" "$(get "$STAGE/pack.json" '(d["since"].get("count_unknown"), d["since"].get("rewritten"))')" "(True, None)"
+pub "" update; t_has "FX2-rewrite: ... the brief says count unknown" "$(cat "$PM/brief.txt")" "count unknown"
+t_eq "FX2-rewrite: ... the state says why (missing)" "$(S 'd["since"].get("count_why")')" "missing"
+t_has "FX2-rewrite: ... and the assurance" "$(S 'd["assurance"]["why"]')" "new-work count unknown"
+
+mkrepo fx2sx; (cd "$R" && for i in 1 2 3; do echo $i >> docs/a.md; git commit -qam "c$i"; done); begin; pub "" full
+(cd "$R" && git rev-parse HEAD~2 > .git/shallow && echo n >> docs/a.md && git commit -qam "new on shallow"); begin
+t_eq "FX2-rewrite: any shallow clone, even with the assessed head in HEAD's history (a merge may hide a side chain): count unknown, shallow" "$(get "$STAGE/pack.json" '(d["since"].get("count_unknown"), d["since"].get("count_why"), d["since"].get("rewritten"))')" "(True, 'shallow', None)"
+rm -f "$R/.git/shallow"
+if [ "$HAVE_NODE" = 1 ]; then
+  rbpage '{"since":{"from":{"generation":"000001-aaaaaaaa","assessed_at":"2026-10-11T10:00:00+03:00"},"commits":20,"listed":20,"dirty":0,"hours":1,"changes":[],"attention":{"kind":"continue","text":"Work goes on","why":"Nothing blocks it"},"not_checked":[],"count_unknown":true,"count_why":"shallow"}}'
+  t_has "FX2-rewrite: page: count unknown says why (a shallow clone)" "$(pj 'd["since"][1]')" "count unknown (a shallow clone: the history before its boundary is not here; these are the latest commits)"
+fi
+# I4 (impl r1): the checklist's current phase is the EFFECTIVE one, after the requested phase completed
+mkrepo fx2p; begin; pub 'J["current_phase"]="P1"; P["phases"][0]["criteria"]=[{"id":"P1.c1","text":"Weights load","done":False}]' full
+(cd "$R" && echo 1 >> docs/a.md && git commit -qam x); begin
+pub 'J["current_phase"]="P1"; J["criteria_updates"]=[{"id":"P1.c1","done":True,"ref":"file:PLAN.md:10"}]' update
+(cd "$R" && echo 2 >> docs/a.md && git commit -qam y); begin
+t_eq "FX2-checklist: the requested phase completed: the pack orders and trims by the effective current phase" "$(get "$STAGE/snapshot.json" 'd["criteria_phase"]')|$(get "$STAGE/pack.json" 'd["criteria"][0]["id"].split(".")[0]')" "P2|P2"
+# I5 (impl r1): a retirement survives a busy update (more than 8 other changes) in the change log and the history
+pub 'J["headline"]["text"]="A very different headline"; J["next_step"]["title"]="Another next step"; J["eta"]=None; J["risks"]=[{"id":"R-1","text":"Another risk","severity":"low"}]
+for p in J["parts"]:
+    p["line"]="changed line"
+J["criteria_updates"]=[{"id":"P2.c3","retired":True,"why":"scope changed upstream"}]' update
+t_eq "FX2-retire: a busy update: the retirement is in the change log and in the history" "$(S '(any(c["id"]=="P2.c3" and c["text"].startswith("retired") for c in d["changes"]), any(c["id"]=="P2.c3" for c in d["history"][-1]["changed"]), len(d["changes"]))')" "(True, True, 8)"
+
+# ---- FX2-exclude (17.5): .project-map/ ignored through the local exclude file; the project's files are never written
+mkrepo fx2x; begin; pub "" full
+t_eq "FX2-exclude: after the first map: an anchored line in .git/info/exclude, no .gitignore, a clean tree" "$(grep -c '^/.project-map/$' "$R/.git/info/exclude")|$([ -e "$R/.gitignore" ] && echo gi || echo none)|$(cd "$R" && git status --porcelain | wc -l | tr -d ' ')" "1|none|0"
+(cd "$R" && echo 1 >> docs/a.md && git commit -qam "x"); begin; pub "" update
+t_eq "FX2-exclude: ... added once, not on every run" "$(grep -c '.project-map/' "$R/.git/info/exclude")" "1"
+mkrepo fx2y; (cd "$R" && printf '.project-map/\n' > .gitignore && git add .gitignore && git commit -qm gi); begin; pub "" full
+t_eq "FX2-exclude: an existing .gitignore rule already ignores it: nothing appended" "$(grep -c 'project-map' "$R/.git/info/exclude")" "0"
+mkrepo fx2s; mkdir -p "$R/pkg/app"; cp -R "$R/PLAN.md" "$R/REVIEW-LOG.md" "$R/README.md" "$R/docs" "$R/pkg/app/"; (cd "$R" && git add -A && git commit -qm pkg); R0=$R; R="$R/pkg/app"; PM="$R/.project-map"
+begin; pub "" full; t_pre "FX2-exclude: a sub-folder map publishes" "$eo" "PM_EMBED_OK"
+t_eq "FX2-exclude: a sub-folder map: the line is anchored at that folder" "$(grep -c '^/pkg/app/.project-map/$' "$R0/.git/info/exclude")" "1"
+mkrepo fx2l; mkdir -p "$T/fx2l-outside"; rm -rf "$R/.git/info"; ln -s "$T/fx2l-outside" "$R/.git/info"; begin; pub "" full
+t_eq "FX2-exclude: info/ is a link: nothing written through it; published with a note" "$(ls "$T/fx2l-outside" | wc -l | tr -d ' ')|$(printf '%s' "$eo" | grep -c 'PM_EMBED_NOTE .project-map/ is not ignored by git')" "0|1"
+t_eq "FX2-exclude: unit: the pattern is anchored and escaped" "$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import pm_git as G;print(G._exclude_pattern("", ".project-map"), G._exclude_pattern("a*b/c", ".project-map"))' "$HOOKS")" '/.project-map/ /a\*b/c/.project-map/'
+
+t_eq "FX2-exclude: unit: a failed ignore check is reported, never silent; no time left defers" "$(python3 -c '
+import sys, time; sys.path.insert(0, sys.argv[1]); import pm_git as G
+real = G._fixed
+G._fixed = lambda root, args, t: (128, "") if args[0] == "check-ignore" else real(root, args, t)
+a = G.ensure_local_exclude(sys.argv[2])
+G._fixed = lambda root, args, t: (124, "") if args[0] == "ls-files" else real(root, args, t)
+b = G.ensure_local_exclude(sys.argv[2])
+G._fixed = real
+c = G.ensure_local_exclude(sys.argv[2], deadline=time.monotonic() - 1)
+print(a[0], b[0], c[0])' "$HOOKS" "$R")" "not_ignored not_ignored deferred"
+XH=$(cd "$R" && git rev-parse --short=7 HEAD)
+mkdir -p "$T/fx2bad"; printf 'gitdir: /nonexistent/x\n' > "$T/fx2bad/.git"; mkdir -p "$T/fx2plain/sub"
+t_eq "FX2-exclude: unit (J3): a broken .git is reported, a plain folder is skipped; (J4) no git call after the deadline" "$(python3 -c '
+import sys, time; sys.path.insert(0, sys.argv[1]); import pm_git as G
+a = G.ensure_local_exclude(sys.argv[2])[0]; b = G.ensure_local_exclude(sys.argv[3])[0]
+G.object_info = lambda *x, **k: (_ for _ in ()).throw(RuntimeError("called"))
+c = G.commit_reach(sys.argv[2], "abcdef1", deadline=time.monotonic() - 1)
+print(a, b, c)' "$HOOKS" "$T/fx2bad" "$T/fx2plain/sub")" "not_ignored skip ('unknown', None)"
+t_eq "FX2-bind: unit: a legacy ref binds when one repository confirms it, not after the deadline, not when two do; a new ref binds root-first" "$(python3 -c '
+import sys, time; sys.path.insert(0, sys.argv[1]); import pm_validate as V
+r, x = sys.argv[2], "commit:" + sys.argv[3]
+one = [{"path": ".", "vcs": "git"}]; two = one + [{"path": "../" + r.rsplit("/", 1)[1], "vcs": "git"}]
+a = len(V.bind_evidence(r, one, [("P1.c3", x)], {}, [("P1.c3", x)]))
+b = len(V.bind_evidence(r, one, [("P1.c3", x)], {}, [("P1.c3", x)], None, time.monotonic() - 1))
+c = len(V.bind_evidence(r, [one[0], one[0]], [("P1.c3", x)], {}, [("P1.c3", x)]))
+d = list(V.bind_evidence(r, [one[0], one[0]], [("P1.c3", x)], {}, []).values())[0]["repo"]
+print(a, b, c, d)' "$HOOKS" "$R" "$XH")" "1 0 0 ."
+
+# ---- FX2-blocked (17.6): a stuck part may wait on an open decision, never on a closed one
+mkrepo fx2k; begin; pub "" full; (cd "$R" && echo 1 >> docs/a.md && git commit -qam x); begin
+STUCK='for p in J["parts"]:
+    if p["status"]=="stuck": p["blocked_by"]="'
+pub "$STUCK"'D-001"' update; t_pre "FX2-blocked: blocked_by an open decision publishes" "$eo" "PM_EMBED_OK"
+(cd "$R" && echo 2 >> docs/a.md && git commit -qam y); begin
+rej "FX2-blocked: blocked_by an unknown id is refused" "$STUCK"'D-009"' "blocked_by must name another part id or an open decision id"
+rej "FX2-blocked: blocked_by a decision this judgement closes is refused" "$STUCK"'D-001"
+J["decisions"][0]["overtaken"]={"why":"done by hand"}' "blocked_by must name another part id or an open decision id"
 
 fi   # PM_FC_ONLY=1
 

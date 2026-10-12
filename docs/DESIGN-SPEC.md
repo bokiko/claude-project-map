@@ -23,7 +23,7 @@ Project name 40 bytes; tagline one line (ellipsis); phase label 60; criterion 80
 Background #101011; card #19191b; line #303034; text #efeff0; soft #b7b7bd; muted #96969e; accent #dbb18c (next-step tile on #261e18 with #5a4331 border); selected phase #222225 with #717178 border. System font stack, mono for numbers and refs. Radii 14-22px. Focus ring 2px #d1d1d6.
 
 ## Rules that do not change
-Embedding: `<script type="application/json" id="state">` placeholder, `<` escaped; all text through `textContent`; no network; `prefers-reduced-motion` removes motion; `<meta name="pm-generation">` stamp; `mobile.html` is generated from the same template. Screenshots: `docs/screenshot.png` (1440x900) and `docs/screenshot-mobile.png` (390 wide, no horizontal overflow). Both come from `docs/demo-state.json`, a fictional project called Lanternfish rendered through the real template.
+Embedding: `<script type="application/json" id="state">` placeholder, `<` escaped; all text through `textContent`; no network; `prefers-reduced-motion` removes motion; `<meta name="pm-generation">` stamp; `mobile.html` is generated from the same template. Screenshots: `docs/screenshot.png` (1440x1000) and `docs/screenshot-mobile.png` (390 wide, no horizontal overflow). Both come from `docs/demo-state.json`, a fictional project called Lanternfish rendered through the real template.
 
 ---
 # Superseded: 3.1 "Blend" spec (history)

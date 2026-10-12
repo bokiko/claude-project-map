@@ -20,7 +20,7 @@ Attribution to the project (documented, approximate where noted):
   2. Claude fallback: a transcript with no cwd match but >= MENTION_MIN mentions of the root
      path counts whole. attribution = "mentions" (totals.approximate = true).
   3. Codex: session_meta/turn_context cwd inside the root ("cwd"), else >= MENTION_MIN mentions
-     of the root path ("mentions"). Sessions under ~/.buzz are never read (Buzz is hands-off).
+     of the root path ("mentions"). Sessions under ~/.buzz are skipped.
 Missing source dir / unreadable data -> status "unavailable" and null totals, never 0.
 
 Tokens per row: in (fresh input), out, cache_read, cache_write, total = sum of the four.

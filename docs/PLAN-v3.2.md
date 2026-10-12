@@ -210,7 +210,7 @@ E7. (Codex P1/P2/D2) Agent prompt names the `.gitignore` append as the one allow
     write; `milestone.origin` named explicitly in the FULL schema; "3 KB target, 6 KB hard" in
     README. No brief Read exists any more (E3). Preflight (A2) covers Codex D1; manifests say
     "any project under a supported root".
-E8. PR #1 (`docs/PLAN-v3-REVIEW.md`): merge as history after B lands; its "Open" items are
+E8. PR #1 (`docs/PLAN-v3-REVIEW.md`, since removed): merge as history after B lands; its "Open" items are
     covered by A1 (self-map refresh), E5 and this plan.
 
 ## Interfaces first (Codex round 1 #10)

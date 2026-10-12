@@ -10,7 +10,7 @@ On any project folder inside your home folder (or a Claude scratchpad). Your hom
 
 ## Is it safe?
 
-The map agent is checked by a guard that runs before every tool call it makes. The guard allows only read-only commands, a fixed set of read-only Git subcommands, reads inside the project and the plugin, and writes to its own output files, its own notes and one `.gitignore` line. It denies secret-looking paths and shell tricks, and the agent can only act on the one project that your own session started it for. Start a new session or run `/reload-plugins` after installing or updating so the guard loads.
+The map agent is checked by a guard that runs before every tool call it makes. The guard allows only read-only commands, a fixed set of read-only Git subcommands, reads inside the project and the plugin, and writes to its own output files and its own notes. It never writes to a project file, not even `.gitignore`. It denies secret-looking paths and shell tricks, and the agent can only act on the one project that your own session started it for. Start a new session or run `/reload-plugins` after installing or updating so the guard loads.
 
 The guard applies to the map agent, not your whole session. One documented limit: Claude Code lets a tool call through if a hook times out, so the guard is written to be fast and refuses oversized input rather than parse it. Decisions covered by hard rules always wait for your approval.
 
@@ -20,27 +20,27 @@ The agent is instructed not to open secrets, and the guard denies names such as 
 
 ## Can it change my code?
 
-No. It writes map files inside `.project-map/`, can save its own memory notes, and adds `.project-map/` to the project's `.gitignore`. It records decisions but does not carry out the proposed work. Approving a choice in the map does not itself authorize a hard-rule action.
+No. It writes map files inside `.project-map/`, can save its own memory notes, and keeps `.project-map/` out of commits through Git's local exclude file (`.git/info/exclude`). It never edits your `.gitignore`. It records decisions but does not carry out the proposed work. Approving a choice in the map does not itself authorize a hard-rule action.
 
 ## Why do I see a short summary when I start Claude Code?
 
 In a mapped project, a SessionStart hook shows the saved brief (about 300 tokens, no model call). Its second line says when the snapshot was taken and when Claude last assessed the project (and `behind:` plus the reason when the project has moved on), and a later line says what changed since that assessment, so you can tell a stale map from a fresh one. It ends with a line saying to run `/project-map` to re-judge. Unmapped projects show nothing.
 
-## Why does it say “not checked by the map”?
+## Why does it say "committed, not verified yet"?
 
-Each change in the “Since the previous assessment” section is either `landed, not checked by the map` or `uncommitted`. The map reads commits and files; it does not run your tests or try the feature, and a routine update is far too small to do that. So a change that landed is shown as landed, with the commit it points to, but never as “works”. What would show it works (a test run, a manual check) is listed under “not checked”. The same cautious wording appears when the model only saw part of the work: `40 of 60 commits shown to the model` means the update was written from 40 of the 60 new commits, and the map then says “No decision identified in the checked information” instead of “Nothing needs you”.
+Each change in the "Since the previous assessment" section is either `committed, not verified yet` or `uncommitted`. The map reads commits and files; it does not run your tests or try the feature, and a routine update is far too small to do that. So a change that was committed is shown as committed, never as "works". What would show it works (a test run, a manual check) is listed on a line starting `not checked:`. The same cautious wording appears when the model only saw part of the work: `map read 40 of 60 commits` means the update was written from 40 of the 60 new commits, and, when no ready decision is open, the pill then says "Nothing found that needs you (partial check)" instead of "Nothing needs you". An open ready decision still makes it say "Needs you".
 
 ## What does it cost?
 
-The first map uses Opus and was measured at about $0.46. A routine Sonnet update was about $0.10. If nothing changed, no model is called and the refresh costs $0. Actual cost depends on the project and your Claude billing arrangement; these are measured estimates.
+The first map uses Opus and costs about $0.5. A routine Sonnet update costs about $0.10. If nothing changed, the refresh needs no extra judging-agent call; your Claude session still uses its usual tokens for the command and the brief. One exception: after updating from a version before 3.6.1, a map whose last assessment read only part of the changes gets one routine update, once. Actual cost depends on the project and your Claude billing arrangement; these are measured estimates.
 
-## Why does it say “Assessment may be out of date”?
+## Why does it say "Assessment may be out of date"?
 
 The project changed after Claude assessed it, possibly while the map was being built. The map keeps the assessment visible and marks it as out of date. Run `/project-map` again. A project being changed by another session may show the warning again.
 
 ## How do I answer a decision?
 
-Open the choices on the page, then reply in Claude Code chat with the letter, such as `A` or `D-004=A`. Claude records the answer and refreshes the map. “Coming up” means the choice is not ready yet. Hard-rule decisions stay on hold until you answer, and the action itself still needs your explicit approval.
+Open the choices on the page, then reply in Claude Code chat with the letter, such as `A` or `D-004=A`. Claude records the answer and refreshes the map. Decisions under "Later decisions" say "Not asked yet" and do not need your answer now. Hard-rule decisions stay on hold until you answer, and the action itself still needs your explicit approval.
 
 ## How do I set the focus?
 
@@ -73,7 +73,7 @@ Then run `/reload-plugins` or start a new session. In a mapped project, the page
 
 ## I had a 3.1 map; what happens?
 
-Your next `/project-map` migrates it with one FULL run (one Opus run, about $0.5). Ids, the ledger link and answered decisions carry over. The old files are kept inside the first 3.2 generation under `legacy/` instead of being deleted, and the stable paths `index.html`, `mobile.html`, `brief.txt` and `state.json` keep working throughout. Until you run it, the session summary says “map needs migration to 3.2”.
+Your next `/project-map` migrates it with one FULL run (one Opus run, about $0.5). Ids, the ledger link and answered decisions carry over. The old files are kept inside the first 3.2 generation under `legacy/` instead of being deleted, and the stable paths `index.html`, `mobile.html`, `brief.txt` and `state.json` keep working throughout. Until you run it, the session summary says "map needs migration to 3.2".
 
 ## What are all these gen-* folders?
 
@@ -87,7 +87,7 @@ Run this in your terminal, then start a new Claude Code session:
 claude plugin uninstall project-map@bokiko-tools
 ```
 
-The generated `.project-map/` folder and its `.gitignore` entry are project files and remain. You can remove them yourself if you no longer want the saved map.
+The generated `.project-map/` folder and its line in `.git/info/exclude` remain. You can remove them yourself if you no longer want the saved map.
 
 ## Does it work without Git?
 

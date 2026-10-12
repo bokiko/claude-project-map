@@ -1033,7 +1033,7 @@ Problem: a criterion or a part stays "done" after the file or commit that proved
 
 ## 16. 3.6.1: the judgement reads the commits; a later decision never waits for an answer
 
-Found live on a real map (kolibri-1, 2026-10-11): 4 new commits, 42 changed files (mostly `__pycache__` and `.backups/` copies), a
+Found live on a real map (2026-10-11): 4 new commits, 42 changed files (mostly `__pycache__` and `.backups/` copies), a
 long ledger. The 8 KB pack was over its cap, and the trim order cut the commit items FIRST (5, 2, 1, 0) while the per-model and
 per-job usage detail (about 2.9 KB, read by no judgement) and the first 20 changed files (all backup copies, by path order) stayed.
 The model judged 0 of 4 commits; every later assessment of that project was `unchecked` because the snapshot listed at most 20

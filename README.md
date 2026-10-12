@@ -16,6 +16,8 @@
   <img src="https://img.shields.io/badge/Bash-3.2%2B-2ecc71?style=flat-square&logo=gnubash&logoColor=white" alt="Bash">
   <img src="https://img.shields.io/badge/Tests-3775%20passing-2ecc71?style=flat-square" alt="3775 tests passing">
   <img src="https://img.shields.io/badge/License-MIT-2ecc71?style=flat-square" alt="License MIT">
+  <a href="https://github.com/bokiko/claude-project-map/actions/workflows/plugin-scanner.yml"><img src="https://github.com/bokiko/claude-project-map/actions/workflows/plugin-scanner.yml/badge.svg" alt="Plugin scanner"></a>
+  <a href="https://github.com/hashgraph-online/awesome-ai-plugins"><img src="https://img.shields.io/badge/Awesome%20AI%20Plugins-listed-2ecc71?style=flat-square" alt="Listed in Awesome AI Plugins"></a>
 </p>
 
 <!-- TYPING SVG: animated tagline -->
@@ -52,7 +54,6 @@ Open the page in your browser, or read a short summary in Claude Code.
    claude plugin marketplace add bokiko/claude-project-map
    claude plugin install project-map@bokiko-tools
    ```
-
 
 2. **Run `/reload-plugins` (or open a new Claude Code session).** The plugin's safety checks (hooks) load at session start and at `/reload-plugins`, nothing else. A session that has not done either will not have them.
 
@@ -109,11 +110,11 @@ The page answers "does anything need me?" first, then where the project stands.
 - **Decisions:** a decision that needs you now is a card under the current phase with its options: an ordinary one shows its default (and date), a hard-rule one says "Waits for your answer". A decision the map will only ask later is listed under "Later decisions (n, not asked yet)" and does not count as needing you.
 - **A little more context:** Handoff, Later decisions (when there are any), Plan vs shipped (every item with its status and evidence reference), Parts, Recent changes, Risks, History, Snapshot (the head, the headline, assessment times and every assurance reason) and Usage. A section with nothing in it says so.
 
-**“Assessment may be out of date”** means the project changed after Claude assessed it. The map stays visible with that warning. Run `/project-map` again to refresh it. If another session keeps changing the project, the warning may return.
+**"Assessment may be out of date"** means the project changed after Claude assessed it. The map stays visible with that warning. Run `/project-map` again to refresh it. If another session keeps changing the project, the warning may return.
 
 To answer a decision, read its card under the current phase (or the question Claude asks you in chat) and reply in Claude Code with the option letter, such as `A`. If several decisions are open, include the decision number: `D-004=A`. The page itself does not submit answers.
 
-If you already did what a decision asked about (for example you tagged and pushed by hand), the next assessment can close it as “Resolved by events”, with the evidence it relied on, instead of asking you again. It does this only when the facts it set down when it raised the question (for example “tag v1.0.0 at HEAD and the branch in sync”) are all true; a refresh without a model does not close it, an answer you give always wins, and it never decides for you.
+If you already did what a decision asked about (for example you tagged and pushed by hand), the next assessment can close it as "Resolved by events", with the evidence it relied on, instead of asking you again. It does this only when the facts it set down when it raised the question (for example "tag v1.0.0 at HEAD and the branch in sync") are all true; a refresh without a model does not close it, an answer you give always wins, and it never decides for you.
 
 Hard-rule decisions always wait for you. These include deleting things, publishing to someone else's project, pushing changes, spending money, or changing infrastructure. Answering the map records your choice; Claude still needs your explicit approval for the action itself.
 
@@ -121,11 +122,11 @@ Hard-rule decisions always wait for you. These include deleting things, publishi
 
 Type `/project-map` again whenever you want a refresh. If nothing changed, it returns the summary without a judging-agent call. One exception: after updating from a version before 3.6.1, a map whose last assessment read only part of the changes gets one routine update ("previous assessment read only part of the changes"), once.
 
-You can also ask **“where are we?”** Claude checks for changes and answers from the short summary.
+You can also ask **"where are we?"** Claude checks for changes and answers from the short summary.
 
 Three phrases work on the focus (new in 3.5): **"confirm focus"** makes the proposed focus yours (your out-of-scope list is kept unless you ask to drop it); **"the focus is X, done when Y"** sets your own (and, if you state them, up to three things that are out of scope); **"handoff"** prints `.project-map/handoff.txt`. A plain confirmation is applied without a model call; a different focus costs one ordinary update. Nothing is asked about the focus on an ordinary refresh.
 
-When the map says **“a decision needs you,”** read the choices and reply in chat with a letter. Claude records your answer and refreshes the map. Check any stated deadline or default: ordinary decisions can have a default, but hard-rule decisions always stay on hold.
+When the map says **"a decision needs you,"** read the choices and reply in chat with a letter. Claude records your answer and refreshes the map. Check any stated deadline or default: ordinary decisions can have a default, but hard-rule decisions always stay on hold.
 
 Your project folder contains `.project-map/index.html` (the browser page), `.project-map/brief.txt` (the short text summary) and `.project-map/handoff.txt` (the text for the next agent), all stable paths. The folder name starts with a dot, so your file browser may hide it. Ask Claude for the full path if you cannot find it. There is also a `mobile.html` view.
 
@@ -165,11 +166,13 @@ After installing or updating, run `/reload-plugins` or start a new session to lo
 | Verdict | Meaning | Cost |
 |---|---|---|
 | `NO_CHANGE` | Nothing moved. Prints the brief, no agent. | no judging call |
-| `NEEDS_REFRESH` | A mechanical re-render (no model), normally done at once; `(deferred: budget)` means it was not done yet: run `/project-map`. | no judging call |
+| `NEEDS_REFRESH` | A mechanical re-render (no model), normally done at once. | no judging call |
 | `NEEDS_JUDGEMENT` | Something changed (or, once after an update from before 3.6.1, the last assessment read only part of the changes). The agent revises the judgement (Sonnet). | about $0.10 |
 | `NEEDS_FULL` | First map, migration, invalid state or schema change. Opus explores and proposes phases. | about $0.5 |
 | `REFRESH_FAILED` | The re-render failed; the previous map stays current. | no judging call |
 | `ERROR` | Git failure, unsupported location, missing prerequisite. | no judging call |
+
+Any verdict line that ends with `(deferred: budget)` was not acted on yet: run `/project-map` again.
 
 "No judging call" means no extra model run by the plugin; the Claude session itself still uses its usual tokens for the commands and the brief it prints.
 
@@ -180,7 +183,7 @@ Outputs in `<ROOT>/.project-map/`: an immutable `gen-<seq>-<id>/` per published 
 1. `scripts/project-map-facts.py` uses the Python standard library and prints a verdict. Its change key covers repository heads and branches, local release facts (tags at HEAD, upstream sync), the working-tree signature, watched files (hashed by content), the ledger, answers, the focus you confirmed (3.5), the references of finished work that are gone (3.6), and expired deadlines. Scripts own the decision lifecycle. Confirming exactly the focus the last assessment proposed is applied by the scripts without a model call. New work is the exact set of commits reachable from HEAD and not from the last read point (3.6.2), so a reset or rebase is counted correctly.
 2. When judgement is needed, facts stages an invocation folder (`inv-<id>/`). The skill spawns the `project-map` agent with three prompt lines (`ROOT`, `INV`, `RUN`). The agent Reads the bounded `pack.json` (8 KB maximum: commits, changed files (20 by name, work first, the rest counted per folder), the open checklist items, ledger lines, decisions, answers; commit subjects are the last optional detail cut) and the frozen `judgement.in.json`, writes `judgement.out.json` (3.5 KB target, 6 KB hard limit; FULL also `plan.out.json`) and runs the embed. A routine update allows at most 8 tool calls, a FULL run 30 (at most 20 extra reads of 300 lines each).
 3. `scripts/project-map-embed.py` validates ids, evidence references (a commit must be in the checked-out history of the repository it was accepted in), hard rules, frozen decisions and path confinement, then publishes a new generation under a lock, only if the generation the agent judged is still current. If another run published first, the result is `SUPERSEDED` and nothing is lost. After publishing it keeps `.project-map/` out of commits through Git's local exclude file.
-4. The agent returns `ASK:` lines because it cannot ask questions directly. The main session asks you, appends the answer to `.project-map/answers.jsonl`, and reruns `/project-map`. Hard-rule decisions never auto-default. “Where are we?” uses `brief.txt`, not `state.json`.
+4. The agent returns `ASK:` lines because it cannot ask questions directly. The main session asks you, appends the answer to `.project-map/answers.jsonl`, and reruns `/project-map`. Hard-rule decisions never auto-default. "Where are we?" uses `brief.txt`, not `state.json`.
 5. Two hooks keep the map current without a model: SessionStart checks the facts and injects the brief (`brief.txt`, at most 1000 bytes, about 300 tokens), or a notice when the map cannot be refreshed or verified; a UserPromptSubmit hook tries one re-render after the plugin's template or embed script changed (it can be deferred and retried; other script changes are picked up by the next facts run).
 
 ### Measured cost (unique API calls, context at the last call)
@@ -243,6 +246,10 @@ Bump `version` in `.claude-plugin/plugin.json` for every release: users stay on 
 ### Limits
 
 Paths with spaces or brackets are rejected; nested repositories are discovered one level deep (deeper ones are collected once a judgement lists them, and the agent can reach only repositories in its snapshot); no dependency-cycle check; usage undercounts sessions started in `~`; unwatched changed files are tracked by size, modification time and change time rather than content, so an edit that preserves all three is not seen; a file reference proves the file and line exist, not what the line says (the agent is told to read and cite the line; an unchanged line number does not prove unchanged content). macOS and Linux only (bash 3.2 compatibility); no Windows.
+
+## Security and feedback
+
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md). Report bugs and ideas as [GitHub Issues](https://github.com/bokiko/claude-project-map/issues). Pushes to main and pull requests are scanned by the HOL plugin scanner (`.github/workflows/plugin-scanner.yml`). The plugin is listed in [Awesome AI Plugins](https://github.com/hashgraph-online/awesome-ai-plugins) (Development & Workflow).
 
 ## License
 

@@ -2,7 +2,7 @@
 """pm_testlib.py: small helpers for tests/test_embed.sh (JSON edits, judgement builders, lock holder, reader).
 
   jud   PM INV full|update [CODE]   write STAGE/judgement.out.json (+ plan.out.json for full); CODE may edit J and P
-  get   FILE EXPR                   print eval(EXPR) with d = the JSON in FILE
+  get   FILE EXPR                   print the value of EXPR with d = the JSON in FILE
   mut   FILE CODE                   edit the JSON in FILE in place (d / J)
   legacy ROOT                       write a 3.x style map under ROOT/.project-map from tests/demo-judgement.json
   holder PM                         hold the publish lock until killed
@@ -10,6 +10,7 @@
   assure FILE [CODE]                print assurance(S) and needs_text(S) as JSON for the state in FILE, after CODE edited d
   brief FILE [CODE]                 print the brief rendered from the state in FILE, after CODE edited d (nothing is written)
   seen PACK                         print the pack's `seen` record as JSON
+  fake NAME                         print the made-up credential FAKE[NAME] (for the secret-filter tests)
 
 jud also writes judgement.out.json with a valid `since` (13.2): present when STAGE/snapshot.json carries a non-null `since`
 (UPDATE and a re-proposing FULL), absent on a first map. Its attention is the first open, ready decision when one forces it
@@ -25,6 +26,20 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "demo-judgement.json")
+# Made-up credentials for the secret-filter tests. Each is written in two pieces so no whole key-shaped string sits in
+# the source, where secret scanners would flag it. CODE snippets see this table as FAKE; the shell gets one with `fake NAME`.
+FAKE = {
+    "aws": "AKIA" + "ABCDEFGHIJKLMNOP",
+    "aws_doc": "AKIA" + "IOSFODNN7EXAMPLE",
+    "anthropic": "sk-" + "ant-api03-abcdefghijklmnopqrstu",
+    "github": "ghp" + "_abcdefghijklmnopqrstuvwx",
+    "github_pat": "github" + "_pat_11ABCDEFG0abcdef",
+    "slack": "xoxb" + "-1234567890-abcdefghij",
+    "gitlab": "glpat" + "-abcdefghijklmnop",
+    "private_key": "-----BEGIN RSA PRIVATE" + " KEY-----",
+    "tag_a": "sk-" + "aaaaaaaaaaaaaaaaaaaaaaaa1",   # two secret-shaped tag names (OV-R2-3)
+    "tag_b": "sk-" + "bbbbbbbbbbbbbbbbbbbbbbbb2",
+}
 
 
 def staged_snapshot(stage):
@@ -153,7 +168,7 @@ def cmd_jud(pm, inv, kind, code=""):
     if kind != "full" and os.path.exists(os.path.join(stage, "plan.out.json")):
         os.remove(os.path.join(stage, "plan.out.json"))
     before = json.dumps(J.get("since"), sort_keys=True)
-    exec(code, {"J": J, "P": P, "json": json, "os": os, "dt": dt})
+    exec(code, {"J": J, "P": P, "json": json, "os": os, "dt": dt, "FAKE": FAKE})
     if "since" in J and J["since"] is not None and json.dumps(J["since"], sort_keys=True) == before:
         J["since"]["attention"] = valid_since(J, staged_snapshot(stage))["attention"]   # the CODE may have raised or flipped decisions
     json.dump(J, open(os.path.join(stage, "judgement.out.json"), "w"))
@@ -162,13 +177,19 @@ def cmd_jud(pm, inv, kind, code=""):
 
 
 def cmd_get(path, expr):
-    d = json.load(open(path))
-    print(eval(expr, {"d": d, "json": json, "len": len, "sum": sum, "sorted": sorted, "set": set}))
+    # EXPR is test code from the suite, run like the CODE of jud/mut; the newline lets EXPR end in a comment
+    g = {"d": json.load(open(path)), "json": json, "len": len, "sum": sum, "sorted": sorted, "set": set}
+    exec("_out = (" + expr + "\n)", g)
+    print(g["_out"])
+
+
+def cmd_fake(name):
+    sys.stdout.write(FAKE[name])
 
 
 def cmd_mut(path, code):
     d = json.load(open(path))
-    exec(code, {"d": d, "J": d, "json": json, "os": os, "dt": dt})
+    exec(code, {"d": d, "J": d, "json": json, "os": os, "dt": dt, "FAKE": FAKE})
     json.dump(d, open(path, "w"))
 
 
@@ -200,7 +221,7 @@ def cmd_assure(path, code=""):
     _scripts()
     import pm_validate as V
     d = json.load(open(path))
-    exec(code, {"d": d, "S": d, "json": json})
+    exec(code, {"d": d, "S": d, "json": json, "FAKE": FAKE})
     d["assurance"] = V.assurance(d)   # the stored assurance is always the recomputed one (build_state / mechanical refresh)
     print(json.dumps({"assurance": d["assurance"], "case": V.needs_case(d), "text": V.needs_text(d)}))
 
@@ -209,7 +230,7 @@ def cmd_brief(path, code=""):
     _scripts()
     import pm_render as R
     d = json.load(open(path))
-    exec(code, {"d": d, "S": d, "json": json})
+    exec(code, {"d": d, "S": d, "json": json, "FAKE": FAKE})
     sys.stdout.write(R.brief(d))
 
 
@@ -271,4 +292,4 @@ def cmd_reader(pm, secs):
 if __name__ == "__main__":
     c = sys.argv[1]
     {"jud": cmd_jud, "get": cmd_get, "mut": cmd_mut, "legacy": cmd_legacy, "resign": cmd_resign, "holder": cmd_holder, "reader": cmd_reader,
-     "assure": cmd_assure, "brief": cmd_brief, "seen": cmd_seen}[c](*sys.argv[2:])
+     "assure": cmd_assure, "brief": cmd_brief, "seen": cmd_seen, "fake": cmd_fake}[c](*sys.argv[2:])

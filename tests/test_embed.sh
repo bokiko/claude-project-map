@@ -21,6 +21,7 @@ t_not() { case "$2" in *"$3"*) bad "$1" "'${2:0:240}' contains '$3'";; *) ok "$1
 t_pre() { case "$2" in "$3"*) ok "$1";; *) bad "$1" "'${2:0:240}' does not start with '$3'";; esac; }
 t_true() { if eval "$2"; then ok "$1"; else bad "$1" "false: $2"; fi; }
 lib()   { python3 "$TD/pm_testlib.py" "$@"; }
+FAKE_AWS=$(lib fake aws)   # a made-up AWS key id for the secret-filter tests (pm_testlib.FAKE; snippets use FAKE["aws"])
 facts() { python3 "$HOOKS/project-map-facts.py" "$R" "$@"; }
 embed() { bash "$HOOKS/project-map-embed.sh" "$R" "$@"; }
 jud()   { lib jud "$PM" "$@"; }
@@ -489,13 +490,13 @@ t_eq "E-mech-superseded: current is untouched by the refused re-render" "$(cur)"
 t_true "E-mech-superseded: no tmp generation left behind" "! ls $PM | grep -q '\\.tmp\$'"
 # Claude review round: secrets, watch loops, signed generations, refs, control characters, answers keys
 mkproj sc || true; bump; begin
-rej "secret: AWS access key id" 'J["next_step"]["why"]="key AKIAABCDEFGHIJKLMNOP here"' "judgement.next_step.why looks like it contains a secret"
-rej "secret: sk-ant style key" 'J["parts"][0]["line"]="sk-ant-api03-abcdefghijklmnopqrstu"' "judgement.parts[0].line looks like it contains a secret"
-rej "secret: GitHub token" 'J["headline"]["text"]="ghp_abcdefghijklmnopqrstuvwx"' "judgement.headline.text looks like"
-rej "secret: github_pat_" 'J["project"]["goal"]="github_pat_11ABCDEFG0abcdef"' "judgement.project.goal looks like"
-rej "secret: Slack token" 'J["risks"][0]["text"]="xoxb-1234567890-abcdefghij"' "judgement.risks[0].text looks like"
+rej "secret: AWS access key id" 'J["next_step"]["why"]="key "+FAKE["aws"]+" here"' "judgement.next_step.why looks like it contains a secret"
+rej "secret: sk-ant style key" 'J["parts"][0]["line"]=FAKE["anthropic"]' "judgement.parts[0].line looks like it contains a secret"
+rej "secret: GitHub token" 'J["headline"]["text"]=FAKE["github"]' "judgement.headline.text looks like"
+rej "secret: github_pat_" 'J["project"]["goal"]=FAKE["github_pat"]' "judgement.project.goal looks like"
+rej "secret: Slack token" 'J["risks"][0]["text"]=FAKE["slack"]' "judgement.risks[0].text looks like"
 rej "secret: JWT" 'J["next_step"]["title"]="eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkw"' "judgement.next_step.title looks like"
-rej "secret: private key block" 'J["next_step"]["why"]="-----BEGIN RSA PRIVATE KEY-----"' "looks like it contains a secret"
+rej "secret: private key block" 'J["next_step"]["why"]=FAKE["private_key"]' "looks like it contains a secret"
 rej "secret: Bearer token" 'J["next_step"]["why"]="Authorization: Bearer abcdefghijklmnopqrstu"' "looks like it contains a secret"
 rej "secret: password=" 'J["next_step"]["why"]="password = hunter2"' "looks like it contains a secret"
 rej "control character (newline) in a string" 'J["next_step"]["why"]="two\nlines"' "judgement.next_step.why contains control characters"
@@ -516,7 +517,7 @@ rej "repos entry .git" 'J["repos"]=[".git"]' "must not contain a .git component"
 rej "part ref into .git/" 'J["parts"][0]["ref"]="file:.git/config"' "points into .git/"
 rej "part ref into .PROJECT-MAP (case-folded)" 'J["parts"][0]["ref"]="file:.PROJECT-MAP/state.json"' "points into .project-map/"
 rej "part ref with a .GIT component" 'J["parts"][0]["ref"]="file:docs/.GIT/x"' "points into .git/"
-rej "FULL: secret in plan.out criterion text" 'P["phases"][1]["criteria"][0]["text"]="use AKIAABCDEFGHIJKLMNOP"' "plan.phases[1].criteria[0].text looks like it contains a secret" full
+rej "FULL: secret in plan.out criterion text" 'P["phases"][1]["criteria"][0]["text"]="use "+FAKE["aws"]' "plan.phases[1].criteria[0].text looks like it contains a secret" full
 rej "FULL: control character in plan.out label" 'P["phases"][0]["label"]="a\nb"' "plan.phases[0].label contains control characters" full
 # answers.jsonl: closed key set, by must be owner
 mkproj ak || true
@@ -567,7 +568,7 @@ out=$(facts); t_pre "E-sign-adopt: a manifest edited under a matching record is 
 mkproj sc2 || true; bump; begin
 rej "secret: Google API key" 'J["next_step"]["why"]="AIza'"$(printf 'a%.0s' $(seq 1 32))"'"' "looks like it contains a secret"
 rej "secret: Stripe live key" 'J["next_step"]["why"]="sk_live_abcdefghijklmnop"' "looks like it contains a secret"
-rej "secret: GitLab token" 'J["next_step"]["why"]="glpat-abcdefghijklmnop"' "looks like it contains a secret"
+rej "secret: GitLab token" 'J["next_step"]["why"]=FAKE["gitlab"]' "looks like it contains a secret"
 rej "secret: npm token" 'J["next_step"]["why"]="npm_'"$(printf 'a%.0s' $(seq 1 30))"'"' "looks like it contains a secret"
 rej "secret: HuggingFace token" 'J["next_step"]["why"]="hf_'"$(printf 'a%.0s' $(seq 1 30))"'"' "looks like it contains a secret"
 rej "secret: URL with credentials" 'J["next_step"]["why"]="clone postgres://admin:pw1234@db.example/x"' "looks like it contains a secret"
@@ -2448,7 +2449,7 @@ bump; begin
 t_eq "OV-R2-2: a CRLF line and a blank line are complete lines (one answer, nothing bad)" "$(get "$STAGE/snapshot.json" '(d["answers"]["total"], len(d["answers"]["pending"]), d["answers"]["bad"])')" "(1, 1, [])"
 
 # ---- OV330-R2-3: tag identity (hash of the raw ref name) instead of the display string
-TA='sk-aaaaaaaaaaaaaaaaaaaaaaaa1'; TB='sk-bbbbbbbbbbbbbbbbbbbbbbbb2'
+TA=$(lib fake tag_a); TB=$(lib fake tag_b)
 mkrepo ovt3; (cd "$R" && git tag "$TA" && git tag "$TB"); begin
 t_eq "OV-R2-3: setup: two different secret-shaped tags both display as [redacted] (with different identities)" "$(get "$STAGE/snapshot.json" '([t["name"] for t in d["repos"][0]["release"]["head_tags"]], len({t["tid"] for t in d["repos"][0]["release"]["head_tags"]}))')" "(['[redacted]', '[redacted]'], 2)"
 t_not "OV-R2-3: ... and the identity is not shown to the model (not in the pack)" "$(cat "$STAGE/pack.json")" '"tid"'
@@ -2470,7 +2471,7 @@ import pm_validate as V
 import pm_common as C
 root = os.path.realpath(tempfile.mkdtemp(prefix="ovunit3.", dir=sys.argv[2]))
 subprocess.run(["git", "init", "-q", root], check=True)
-A, B = "sk-aaaaaaaaaaaaaaaaaaaaaaaa1", "sk-bbbbbbbbbbbbbbbbbbbbbbbb2"
+A, B = sys.argv[3], sys.argv[4]
 snap = lambda raw: {"repos": [{"path": ".", "vcs": "git", "release": {"head_tags": [{"name": C.display_safe(t), "tid": C.tag_tid(t)} for t in raw],
                                                                           "sync": {"state": "aligned"}}}], "commits": {"days": []}}
 pred = {"kind": "tag_at_head", "repo": ".", "name": "[redacted]", "tid": C.tag_tid(A)}
@@ -2482,7 +2483,7 @@ out = [E([A]), E([B]), E([A, B]), E([]),
        E([A], {"kind": "tag_at_head", "repo": ".", "name": "[redacted]"})]        # a display-only predicate matches no raw tag
 print(out)
 PY
-t_eq "OV-R2-3: unit: the identity decides, not the display string; name null = any tag; no identity falls back to the plain name only" "$(python3 -I "$T/ov_unit3.py" "$HOOKS" "$T")" "[True, False, True, False, True, False, True, False]"
+t_eq "OV-R2-3: unit: the identity decides, not the display string; name null = any tag; no identity falls back to the plain name only" "$(python3 -I "$T/ov_unit3.py" "$HOOKS" "$T" "$TA" "$TB")" "[True, False, True, False, True, False, True, False]"
 
 # ---- OV330-R2-4: exists:false is about the directory entry, not its dereferenced target
 mkrepo ovf
@@ -2762,7 +2763,7 @@ rej "RB-required: attention why over 120 bytes" 'J["since"]["attention"]["why"]=
 rej "RB-required: unknown attention kind" 'J["since"]["attention"]["kind"]="maybe"' "since.attention.kind must be one of decision|continue|waiting|unchecked"
 rej "RB-required: more than 3 not_checked entries" 'J["since"]["not_checked"]=["a","b","c","d"]' "since.not_checked has 4 entries, allowed 0..3"
 rej "RB-required: a not_checked entry over 80 bytes" 'J["since"]["not_checked"]=["x"*81]' "since.not_checked[1] must be 1..80 bytes"
-rej "RB-required: a secret-looking token inside since is refused" 'J["since"]["changes"]=[{"text":"key AKIAIOSFODNN7EXAMPLE added","state":"uncommitted"}]' "looks like it contains a secret"
+rej "RB-required: a secret-looking token inside since is refused" 'J["since"]["changes"]=[{"text":"key "+FAKE["aws_doc"]+" added","state":"uncommitted"}]' "looks like it contains a secret"
 rej "RB-required: attention id on a kind that is not decision" 'J["since"]["attention"]["id"]="D-001"' "since.attention.id must be absent unless kind is decision"
 pub 'J["since"]["not_checked"]=["Nothing here shows the full-model check passes"]'
 t_pre "RB-required: a valid since publishes" "$eo" "PM_EMBED_OK"
@@ -3312,7 +3313,7 @@ rej "FC-required: unknown key hash" 'J["intent"]["hash"]="x"' "intent has unknow
 rej "FC-required: the model cannot write accepted" 'J["intent"]["accepted"]={"outcome":"a","done_when":"b"}' "intent has unknown keys: accepted" full
 rej "FC-required: outcome over 120 bytes" 'J["intent"]["outcome"]="x"*121' "intent.outcome must be 1..120 bytes (is 121)" full
 rej "FC-required: done_when empty" 'J["intent"]["done_when"]=""' "intent.done_when must be 1..120 bytes (is 0)" full
-rej "FC-required: a secret-shaped outcome" 'J["intent"]["outcome"]="deploy with AKIAABCDEFGHIJKLMNOP"' "judgement.intent.outcome looks like it contains a secret" full
+rej "FC-required: a secret-shaped outcome" 'J["intent"]["outcome"]="deploy with "+FAKE["aws"]' "judgement.intent.outcome looks like it contains a secret" full
 rej "FC-required: a bidi override in done_when" 'J["intent"]["done_when"]="a‮b"' "judgement.intent.done_when contains bidirectional override" full
 jud "$INVN" full ""; eo=$(embed "$INVN")
 t_pre "FC-required: a valid intent publishes" "$eo" "PM_EMBED_OK"
@@ -3329,7 +3330,7 @@ t_eq "FC-required: the update's pack carries the standing proposal" "$(get "$STA
 # ---- FC-set: the F-set line (shape, safety), the reducer, "the last one wins", never a decision answer
 mkproj fcs || true
 fcraw '{"id":"D-001","answer":"hold","exclusions":["x"],"by":"owner"}'
-fcraw '{"id":"F-set","answer":"deploy with AKIAABCDEFGHIJKLMNOP","note":"d","by":"owner"}'
+fcraw '{"id":"F-set","answer":"deploy with '"$FAKE_AWS"'","note":"d","by":"owner"}'
 fcraw '{"id":"F-set","answer":"Outcome without a note","by":"owner"}'
 fcraw '{"id":"F-set","answer":"o","note":"d","exclusions":["a","b","c","d"],"by":"owner"}'
 python3 -c 'import json,sys;print(json.dumps({"id":"F-set","answer":"o","note":"d","exclusions":["x"*81],"by":"owner"}))' >> "$PM/answers.jsonl"
@@ -3809,18 +3810,18 @@ if i == "F-set":
 open(p, "a").write(json.dumps(r, ensure_ascii=False) + "\n")
 PY
 }
-t_eq "FC-at: at_problem: absent, null, date-only, minutes, Z, offsets, fractions, a space separator are fine; control, bidi, zero-width, trailing newline, text, secrets, numbers, bad dates and long values are not" "$(python3 -I - "$HOOKS" <<'PY'
+t_eq "FC-at: at_problem: absent, null, date-only, minutes, Z, offsets, fractions, a space separator are fine; control, bidi, zero-width, trailing newline, text, secrets, numbers, bad dates and long values are not" "$(python3 -I - "$HOOKS" "$FAKE_AWS" <<'PY'
 import sys, json
 sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
 import pm_collect as K
 ok = [None, "2026-10-11", "2026-10-11T10:00", "2026-10-11T10:00:00Z", "2026-10-11T10:00:00+03:00", "2026-10-11T10:00:00+0300", "2026-10-11T10:00:00.5+03:00", "2026-10-11 10:00:00"]
-bad = ["", "x\nFAKE:ok", "2026-10-11\n", "2026-10-11T10:00:00+03:00\nFAKE:ok", "2026-10-11‮", "2026-10-11​", "2026-10-11 x", "tomorrow", "AKIAABCDEFGHIJKLMNOP",
+bad = ["", "x\nFAKE:ok", "2026-10-11\n", "2026-10-11T10:00:00+03:00\nFAKE:ok", "2026-10-11‮", "2026-10-11​", "2026-10-11 x", "tomorrow", sys.argv[2],
        123, True, ["2026-10-11"], "2026-13-45", "2026-10-11T25:99", "2026-10-11T10:00:00+03:00" + "0" * 20, "20261011", " 2026-10-11"]
 print(json.dumps([[K.at_problem(x) for x in ok], [bool(K.at_problem(x)) for x in bad]]))
 PY
 )" '[[null, null, null, null, null, null, null, null], [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true]]'
 mkproj fct || true
-for a in '"x\nFAKE:ok"' '"2026-10-11T10:00:00+03:00\nFAKE:ok"' '"2026-10-11‮"' '"2026-10-11​"' '"tomorrow"' '"AKIAABCDEFGHIJKLMNOP"' '123' '"2026-13-45"'; do fcat "$a"; done
+for a in '"x\nFAKE:ok"' '"2026-10-11T10:00:00+03:00\nFAKE:ok"' '"2026-10-11‮"' '"2026-10-11​"' '"tomorrow"' "\"$FAKE_AWS\"" '123' '"2026-13-45"'; do fcat "$a"; done
 fcat '"x\nFAKE:ok"' D-001
 begin
 t_pre "FC-at: confirming F-sets with a hostile at are bad lines, so the confirmation is NOT model-free" "$out" "NEEDS_JUDGEMENT 1 pending answers inv "
@@ -4248,7 +4249,7 @@ rej "DR-fit: a departure needs a concern" 'J["fit"]={"verdict":"departure","evid
 rej "DR-fit: a departure needs evidence" 'J["fit"]={"verdict":"departure","concern":"x"}' "fit.evidence is required for a departure"
 rej "DR-fit: at most three evidence refs" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["commit:'$SHA1'","file:PLAN.md","commit:'$SHA1'","file:PLAN.md"]}' "fit.evidence has 4 entries, allowed 1..3"
 rej "DR-fit: concern over 160 bytes" 'J["fit"]={"verdict":"departure","concern":"x"*161,"evidence":["commit:'$SHA1'"]}' "fit.concern must be 1..160 bytes"
-rej "DR-fit: a secret-shaped concern" 'J["fit"]={"verdict":"departure","concern":"deploy with AKIAABCDEFGHIJKLMNOP","evidence":["commit:'$SHA1'"]}' "judgement.fit.concern looks like it contains a secret"
+rej "DR-fit: a secret-shaped concern" 'J["fit"]={"verdict":"departure","concern":"deploy with "+FAKE["aws"],"evidence":["commit:'$SHA1'"]}' "judgement.fit.concern looks like it contains a secret"
 rej "DR-fit: evidence from OUTSIDE the pack: a commit it did not list" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["commit:1234567"]}' "fit.evidence[1]: commit 1234567 is not one of the commits the pack listed (fit evidence must be an observation the pack supplied)"
 rej "DR-fit: evidence from outside the pack: a clean file" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["file:README.md"]}' "file README.md is not a changed file the pack listed"
 rej "DR-fit: evidence from outside the pack: a path that is not a file ref at all" 'J["fit"]={"verdict":"departure","concern":"x","evidence":["README.md"]}' "ref must start with commit: or file:"

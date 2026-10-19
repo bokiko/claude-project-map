@@ -1,5 +1,3 @@
-[![HOL Guard](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dbokiko%252Fproject-map%26metric%3Dtrust)](https://hol.org/registry/plugins/bokiko%2Fproject-map)
-
 <!-- HEADER: Capsule-render wave banner -->
 <p align="center">
   <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&height=200&section=header&text=project-map&fontSize=60&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=One%20command.%20One%20page.%20Where%20your%20project%20stands.&descAlignY=55&descAlign=50" alt="project-map" />
@@ -20,6 +18,7 @@
   <img src="https://img.shields.io/badge/License-MIT-2ecc71?style=flat-square" alt="License MIT">
   <a href="https://github.com/bokiko/claude-project-map/actions/workflows/plugin-scanner.yml"><img src="https://github.com/bokiko/claude-project-map/actions/workflows/plugin-scanner.yml/badge.svg" alt="Plugin scanner"></a>
   <a href="https://github.com/hashgraph-online/awesome-ai-plugins"><img src="https://img.shields.io/badge/Awesome%20AI%20Plugins-listed-2ecc71?style=flat-square" alt="Listed in Awesome AI Plugins"></a>
+  <a href="https://hol.org/registry/plugins/bokiko%2Fproject-map"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dbokiko%252Fproject-map%26metric%3Dtrust&style=flat-square" alt="HOL Guard trust score"></a>
 </p>
 
 <!-- TYPING SVG: animated tagline -->

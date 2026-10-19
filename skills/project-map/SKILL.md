@@ -2,6 +2,7 @@
 name: project-map
 argument-hint: "[ROOT]"
 description: Build or refresh the one-page HTML project map for any project in your home folder (/project-map [ROOT]). Cheap when nothing changed.
+license: MIT
 ---
 
 # /project-map [ROOT]
